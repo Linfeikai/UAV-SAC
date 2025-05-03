@@ -193,7 +193,10 @@ def main():
 
     # 保存模型
 
-    model.save("sac_uav_model")
+    import time
+
+    timestamp = int(time.time())
+    model.save(f"sac_uav_model_{timestamp}")  # 使用时间戳保存模型
 
 
 def TD3_test():
@@ -236,7 +239,7 @@ def TD3_test():
 
 def test_model():
     # 加载模型
-    model = TD3.load("sac_uav_model")
+    model = SAC.load("sac_uav_model")
     # 创建环境
     # 创建环境
     env = gym.make("UAVEnv-v0", render_mode="human")
@@ -277,7 +280,7 @@ def test_model():
 
 
 if __name__ == "__main__":
-    main()
-    # test_model()
+    # main()
+    test_model()
     # TD3_test()
     # find_best_hyperparameters()
