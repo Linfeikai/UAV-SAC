@@ -193,29 +193,23 @@ class CustomEnv(gym.Env):
         计算无人机越界惩罚
         :param new_loc: 无人机的新位置
         :return: 越界惩罚值
-        (可以扩展为多无人机系统的越界惩罚)
+        (可以扩展为多无人机系统的越界惩罚，现在只有一个)
         """
-        # 如果是一维数组，转换成二维
-        new_loc = (
-            [new_loc] if not isinstance(new_loc[1], (list, tuple)) else new_loc
-        )  # 确保输入是二维坐标
-        # 转换为numpy数组
-        new_loc = np.array(new_loc, dtype=np.float32)  # 转换为NumPy数组
-        X_min = np.array([0, 0], dtype=np.float32)  # 二维区域最小边界
-        X_max = np.array(
-            [self.ground_width, self.ground_height], dtype=np.float32
-        )  # 二维区域最大边界
+        margin = 10  # 增加缓冲带
+        x, y = new_loc
+        penalty = 0
 
-        clipped_pos = np.clip(new_loc, X_min, X_max)  # 裁剪位置
+        if x < margin:
+            penalty += (margin - x) / margin
+        elif x > self.ground_width - margin:
+            penalty += (x - (self.ground_width - margin)) / margin
 
-        # 计算越界距离（欧氏距离）
-        d_m = np.linalg.norm(new_loc - clipped_pos, axis=-1)  # [N,]
+        if y < margin:
+            penalty += (margin - y) / margin
+        elif y > self.ground_height - margin:
+            penalty += (y - (self.ground_height - margin)) / margin
 
-        penalty_m = 1 + d_m / self.ground_width  # 单机惩罚项
-
-        p_o = np.mean(penalty_m)  # 系统级平均惩罚
-        p_o = -float(p_o)  # 确保返回值是float类型
-        return p_o  # 返回平均惩罚值
+        return -penalty
 
     def step(self, action):
         self.current_step += 1  # 增加当前步数
@@ -232,20 +226,21 @@ class CustomEnv(gym.Env):
 
         out_of_border_penalty = 0
         action_invalid_penalty = 0
+        static_penalty = 0
         find_notask_node_penalty = 0
         offloading_imbalance_penalty = 0
 
         local_time = 0.0  # 本地计算时间
 
         ue_id = np.clip(int(ue_id), 0, self.ue_num - 1)  # 确保ue_id在合法范围内
-        offloading_ratio = np.clip(offloading_ratio, 0.0, 1.0)  # 限制在[0,1]区间
+        offloading_ratio = np.clip(float(action[3]), 0.0, 1.0)
         if abs(offloading_ratio) < 0.01:
             offloading_ratio = 0.0
         # print(f"offloading_ratio: {offloading_ratio}")
         distance = np.clip(distance, 0.0, 1.0)  # 限制在[0,1]区间
 
         dis_fly = (
-            self.uav.flying_speed * distance * self.t_fly
+            self.uav.max_speed * distance * self.t_fly
         )  # 最大速度乘当前比率，得到飞行直线距离
         new_x = self.uav.loc[0] + dis_fly * math.cos(angle)
         new_y = self.uav.loc[1] + dis_fly * math.sin(angle)
@@ -268,16 +263,15 @@ class CustomEnv(gym.Env):
             dis_fly = np.sqrt(
                 (new_x - self.uav.loc[0]) ** 2 + (new_y - self.uav.loc[1]) ** 2
             )
-            if dis_fly > 30:
-                dis_fly = 30
-            elif dis_fly < 0:
-                dis_fly = 0
-                self.uav.flying_speed = 0
-            else:
-                self.uav.flying_speed = dis_fly
 
             angle = math.atan2(new_y - self.uav.loc[1], new_x - self.uav.loc[0])
-            action_invalid_penalty = -10
+            action_invalid_penalty += -2
+
+        dis_fly = np.clip(dis_fly, 0, 30)
+        self.uav.flying_speed = dis_fly
+
+        if dis_fly < 5:
+            static_penalty = -1
 
         # 如果agent找到了没有任务的结点（现在暂时不可能）
         if self.nodeList[ue_id].current_cache_size == 0:
@@ -325,9 +319,17 @@ class CustomEnv(gym.Env):
             "terminated": terminated,
         }  # Define an empty dictionary for additional information
         recent_count = list(self.service_history).count(ue_id)
-        offloading_imbalance_penalty = -10 * recent_count  # 每重复一次惩罚增加10
 
-        reward = -delay + out_of_border_penalty + action_invalid_penalty + flying_reward
+        offloading_imbalance_penalty = -2 * (recent_count - 1)
+
+        # flying_reward已经在uav的moveto里解决了正负，所以这里直接相加。
+        reward = (
+            -delay
+            + out_of_border_penalty
+            + action_invalid_penalty
+            + flying_reward
+            + static_penalty
+        )
         reward = float(reward)  # 关键修复！确保在返回前转换
 
         return self._get_obs(), reward, terminated, truncated, info

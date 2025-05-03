@@ -158,7 +158,7 @@ def find_best_hyperparameters():
 
 def main():
     env1 = gym.make("UAVEnv-v0")
-    env1.seed(42)  # 设置随机种子以确保可重复性
+    env1.reset(seed=SEED)  # 设置随机种子以确保可重复性
 
     metric_callback = EpisodeMetricCallback(verbose=1)
     progress_bar_callback = ProgressBarCallback()

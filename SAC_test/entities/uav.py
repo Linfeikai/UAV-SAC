@@ -40,14 +40,12 @@ class UAVNode:
         dis_after_flying = np.sqrt(
             (self.loc[0] - loc_ue[0]) ** 2 + (self.loc[1] - loc_ue[1]) ** 2
         )
+        # 如果算出来是正，那么奖励就是正的，说明before比after大，说明飞行是有意义的
+        # 如果算出来是负的，那么说明飞行是没有意义的，奖励就是负的
+        delta_dis = dis_before_flying - dis_after_flying  # 距离变化量
 
-        if dis_after_flying < dis_before_flying:
-            reward = (dis_before_flying - dis_after_flying) * 10  # 离UE近了
-        elif dis_after_flying > dis_before_flying:
-            reward = (dis_after_flying - dis_before_flying) * (-1)  # 离UE远了
-        elif dis_after_flying == dis_before_flying:  # 竟然敢静止不动？？
-            print("静止不动")
-            reward = -20  # 静止惩罚
+        reward += delta_dis * 5  # 可以调节系数
+
         return e_fly, reward  # 返回飞行耗能和奖励
 
     def offload(
