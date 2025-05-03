@@ -327,7 +327,7 @@ class CustomEnv(gym.Env):
             -delay
             + out_of_border_penalty
             + action_invalid_penalty
-            + flying_reward
+            + flying_reward * 0.25
             + static_penalty
         )
         reward = float(reward)  # 关键修复！确保在返回前转换
