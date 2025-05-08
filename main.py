@@ -8,6 +8,7 @@ from stable_baselines3 import SAC, TD3
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.evaluation import evaluate_policy
 
+import random
 import wandb
 from wandb.integration.sb3 import WandbCallback
 
@@ -24,8 +25,6 @@ warnings.filterwarnings("ignore")
 
 # 固定随机种子
 SEED = 42
-torch.manual_seed(SEED)
-np.random.seed(SEED)
 
 
 register(
@@ -252,7 +251,7 @@ def TD3_test():
 
 def test_model():
     # 加载模型
-    model = SAC.load("sac_uav_model_1746280931")
+    model = SAC.load("sac_uav_model_1746461087")
     # 创建环境
     # 创建环境
     env = gym.make("UAVEnv-v0", render_mode="human")
