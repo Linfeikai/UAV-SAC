@@ -5,13 +5,14 @@ from optuna.visualization import plot_optimization_history, plot_param_importanc
 from gymnasium.envs.registration import register
 from stable_baselines3.common.env_checker import check_env
 from stable_baselines3 import SAC, TD3
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.evaluation import evaluate_policy
 
 import random
 import wandb
 from wandb.integration.sb3 import WandbCallback
 
+import pandas as pd  # Optional, but helpful
 
 import numpy as np
 import torch
@@ -139,7 +140,7 @@ def objective(trial: optuna.Trial):
     return mean_reward
 
 
-def find_best_hyperparameters():
+def find_best_hyperparameters_optuna():
     study = optuna.create_study(
         direction="maximize", sampler=optuna.samplers.TPESampler(seed=SEED)
     )
@@ -164,16 +165,16 @@ def find_best_hyperparameters():
     fig2.show()
 
 
-def main():
+def SACtest():
     env1 = gym.make("UAVEnv-v0")
     env1.reset(seed=SEED)  # 设置随机种子以确保可重复性
 
     wandb.init(
         project="UAV-SAC_1",  # 项目名称（wandb 仪表盘中显示）
-        name="experiment-2",  # 实验名称（可选）
+        name="experiment-SAC",  # 实验名称（可选）
         config={  # 记录超参数（可选）
             "policy": "MlpPolicy",
-            "total_timesteps": 10000,
+            "total_timesteps": 100000,
         },
         sync_tensorboard=True,  # auto-upload sb3's tensorboard metrics
     )
@@ -197,7 +198,7 @@ def main():
 
     # 训练模型（带进度条）
     model.learn(
-        total_timesteps=10000,
+        total_timesteps=100000,
         callback=metric_callback,  # 显示进度条
         log_interval=10,  # 每10步打印一次日志
     )
@@ -212,46 +213,236 @@ def main():
 
 
 def TD3_test():
-    env1 = gym.make("UAVEnv-v0", seed=42)
-    # env1.seed(42)  # 设置随机种子以确保可重复性
+    print("当前模式:", "Sweep" if wandb.config else "普通训练")
+    print("传入的 config:", wandb.config)  # 检查是否收到参数
 
-    metric_callback = EpisodeMetricCallback(verbose=1)
-    progress_bar_callback = ProgressBarCallback()
-    combined_callback = CallbackList(
-        [
-            metric_callback,
-            progress_bar_callback,  # 显示进度条
-        ]
+    run = wandb.init(
+        project="UAV-SAC_1",  # 项目名称（wandb 仪表盘中显示）
+        name="experiment-TD3-2",  # 实验名称（可选）
+        config=wandb.config,  # 接收sweep传入的参数
+        sync_tensorboard=True,
+        monitor_gym=True,  # 自动记录环境指标
     )
 
-    # env1._get_obs()
-    check_env(env1.unwrapped, skip_render_check=True)
+    env = gym.make("UAVEnv-v0")
+    env.reset(seed=SEED)  # 设置随机种子以确保可重复性
+    check_env(env.unwrapped, skip_render_check=True)
+
+    # 使用config中的参数（sweep模式）或默认值（普通训练）
+    params = {
+        "gamma": wandb.config.gamma if wandb.config else 0.99,
+        "batch_size": wandb.config.batch_size if wandb.config else 64,
+        "learning_rate": wandb.config.learning_rate if wandb.config else 3e-4,
+        "buffer_size": wandb.config.buffer_size if wandb.config else 300_000,
+        "tau": wandb.config.tau if wandb.config else 0.003,
+        "policy_delay": wandb.config.policy_delay if wandb.config else 4,
+        "target_policy_noise": wandb.config.target_policy_noise
+        if wandb.config
+        else 0.3,
+        "target_noise_clip": wandb.config.target_noise_clip if wandb.config else 0.5,
+    }
+    policy_kwargs = {}
+    if wandb.config and hasattr(wandb.config, "net_arch"):
+        policy_kwargs["net_arch"] = wandb.config.net_arch
+
+    callbacks = [
+        EpisodeMetricCallback(verbose=1),
+    ]
+
     # 初始化 SAC 模型
     model = TD3(
         "MlpPolicy",  # 使用多层感知机策略
-        env1,
+        env,
         verbose=1,  # 打印训练日志
-        tensorboard_log="./td3_logs",  # 保存日志用于TensorBoard可视化
-        gamma=0.99,  # 折扣因子
-        batch_size=256,  # 经验回放的批量大小
-        learning_rate=3e-4,  # 学习率
+        tensorboard_log=f"./TD3_logs/{run.id}",
+        **params,
+        policy_kwargs=policy_kwargs if policy_kwargs else None,
     )
 
     # 训练模型（带进度条）
     model.learn(
-        total_timesteps=100000,
-        callback=combined_callback,  # 显示进度条
+        total_timesteps=10000,
+        callback=CallbackList(callbacks),  # 显示进度条
         log_interval=10,  # 每10步打印一次日志
     )
 
     # 保存模型
+    model.save(f"TD3_uav_model_{run.id}")
+    wandb.finish()
 
-    model.save("sac_uav_model")
+
+def find_best_hyperparameters_sweep():
+    sweep_configuration = {
+        "name": "SB3_TD3_Offloading",
+        "method": "bayes",
+        "metric": {
+            "name": "rollout/ep_rew_mean",  # SB3自动记录的平均回合奖励
+            "goal": "maximize",
+        },
+        "parameters": {
+            # 核心参数 (与SB3实现严格对应)
+            "learning_rate": {
+                "distribution": "log_uniform_values",
+                "min": 1e-5,  # 1e-5
+                "max": 1e-3,  # 1e-3
+            },
+            "buffer_size": {
+                "values": [100000, 300000, 1000000]  # 1e5 to 1e6
+            },
+            "batch_size": {"values": [64, 128, 256, 512]},
+            "tau": {"min": 0.001, "max": 0.01},
+            "gamma": {"min": 0.9, "max": 0.999},
+            # TD3特有参数
+            "policy_delay": {
+                "values": [2, 3, 4]  # 必须为整数
+            },
+            "target_policy_noise": {"min": 0.1, "max": 0.3},
+            "target_noise_clip": {"min": 0.3, "max": 0.7},
+            # 网络结构参数
+            "net_arch": {
+                "values": [
+                    [64, 64],  # 简单双隐藏层
+                    [128, 128],
+                    [256, 256],
+                    {"pi": [64], "qf": [128]},  # 异构结构
+                    {"pi": [128, 128], "qf": [256, 256]},
+                ]
+            },
+        },
+        "early_terminate": {"type": "hyperband", "min_iter": 10, "eta": 3},
+    }
+    sweep_id = wandb.sweep(
+        sweep=sweep_configuration,
+        project="UAV-TD3-Optimization",
+        entity="SACtest",  # 你的 W&B 用户名
+    )
+    print(f"Sweep ID: {sweep_id}")  # 确认 Sweep 已创建
+    wandb.agent(sweep_id, function=TD3_test, entity="SACtest", count=10)  # 运行30次实验
+
+
+def TD3_useThebest():
+    entity = "SACtest"
+    # The name of your W&B project
+    project = "UAV-TD3-Optimization"
+    # The sweep ID you have (tn145nan)
+    sweep_id = "zfinb4uk"
+    # The metric you want to maximize (e.g., average episode reward)
+    # Check your W&B run pages to confirm the exact name logged by SB3
+    metric_to_optimize = "rollout/ep_rew_mean"
+    api = wandb.Api()
+    try:
+        sweep = api.sweep(f"{entity}/{project}/{sweep_id}")
+        print(f"Successfully accessed sweep: {sweep.name} ({sweep_id})")
+    except Exception as e:
+        print(f"Error accessing sweep {entity}/{project}/{sweep_id}: {e}")
+        print("Please check your entity, project name, and sweep ID.")
+        exit()  # Exit if sweep cannot be accessed
+
+    print(f"Fetching runs for sweep...")
+
+    best_run = None
+    best_metric_value = -float("inf")  # Initialize for maximization
+
+    runs_data = []  # To store data for potential DataFrame
+    for run in sweep.runs:
+        # Access summary metrics (usually contains the last value logged)
+        summary = run.summary
+
+        # Access configuration (hyperparameters)
+        config = run.config
+
+        # Check if the metric exists in the summary and is a number
+        if metric_to_optimize in summary and isinstance(
+            summary[metric_to_optimize], (int, float)
+        ):
+            metric_value = summary[metric_to_optimize]
+
+            # print(f"Run {run.name} ({run.id}): {metric_to_optimize} = {metric_value}") # Uncomment to see each run's metric
+
+            # Check if this run is better than the current best
+            if metric_value > best_metric_value:
+                best_metric_value = metric_value
+                best_run = run
+
+            # Store basic info and config
+            runs_data.append(
+                {
+                    "run_id": run.id,
+                    "run_name": run.name,
+                    "metric_value": metric_value,
+                    "config": config,
+                }
+            )
+        # else:
+        # print(f"Run {run.name} ({run.id}): Metric '{metric_to_optimize}' not found or not a number in summary.")
+
+    if best_run:
+        print("\n--- Best Run Found ---")
+        print(f"Run Name: {best_run.name}")
+        print(f"Run ID: {best_run.id}")
+        print(f"Best {metric_to_optimize}: {best_metric_value}")
+        print("\nHyperparameters (Config):")
+        best_config = {}
+        policy_kwargs = {}
+        print(f"Policy Architecture: {policy_kwargs}")
+        for key, value in best_run.config.items():
+            # Skip wandb internal keys if necessary
+            if not key.startswith("_"):
+                if key == "net_arch":
+                    policy_kwargs[key] = value
+                    continue
+                best_config[key] = value
+                print(f"  {key}: {value}")
+
+        if best_config:
+            print("\n--- Training Final Model with Best Config ---")
+            env = gym.make("UAVEnv-v0")
+            env.reset(seed=SEED)  # 设置随机种子以确保可重复性
+            check_env(env.unwrapped, skip_render_check=True)
+            run = wandb.init(
+                project="UAV-SAC_1",  # 项目名称（wandb 仪表盘中显示）
+                name="experiment-TD3-2",
+                sync_tensorboard=True,
+            )  # 实验名称（可选）
+            model = TD3(
+                "MlpPolicy",
+                env,
+                verbose=1,
+                tensorboard_log=f"./TD3_logs/{best_run.id}",
+                **best_config,
+                policy_kwargs=policy_kwargs if policy_kwargs else None,
+            )
+            model.learn(
+                total_timesteps=100000,
+                callback=EpisodeMetricCallback(verbose=1),
+                log_interval=10,
+            )
+            model.save(f"TD3_uav_model_{best_run.id}")
+
+        # The `best_config` dictionary now contains the hyperparameters
+        # of the run that achieved the best value for your specified metric.
+
+        # Optional: Create a DataFrame to inspect all runs' final metrics and config
+    #     if runs_data:
+    #         df = pd.DataFrame(runs_data)
+    #         # Sort to see top runs
+    #         df_sorted = df.sort_values(by="metric_value", ascending=False)
+    #         print("\n--- Top 5 Runs by Metric ---")
+    #         print(
+    #             df_sorted[["run_name", "metric_value"]].head().to_markdown(index=False)
+    #         )
+    #         # df_sorted.to_csv("sweep_results.csv", index=False) # Save results to CSV
+
+    # else:
+    #     print(
+    #         f"\nNo runs found in the sweep, or metric '{metric_to_optimize}' was not logged correctly in any run."
+    #     )
+    #     best_config = None  # Ensure best_config is None if no best run was found
 
 
 def test_model():
     # 加载模型
-    model = SAC.load("sac_uav_model_1746461087")
+    model = SAC.load("sac_uav_model_1746759492")
     # 创建环境
     # 创建环境
     env = gym.make("UAVEnv-v0", render_mode="human")
@@ -292,7 +483,9 @@ def test_model():
 
 
 if __name__ == "__main__":
-    main()
+    # vv()
     # test_model()
     # TD3_test()
+    TD3_useThebest()
     # find_best_hyperparameters()
+    # find_best_hyperparameters_sweep()
