@@ -30,6 +30,7 @@ from typing import List, Tuple
 import math
 
 
+# 没有对两个东西进行惩罚：静止不动，还有不公平服务
 class CustomEnv(gym.Env):
     metadata = {
         "render_modes": ["human", "rgb_array"],
@@ -66,7 +67,9 @@ class CustomEnv(gym.Env):
     delta_t = t_fly + t_com  # 1s飞行, 后7s用于悬停计算
     slot_num = int(T / delta_t)  # 40个间隔
 
-    def __init__(self, render_mode=None):
+    def __init__(
+        self, render_mode=None, continues_dim=3, continues_low=None, continues_high=None
+    ):  # 离散值：选择ue；连续值：距离，方向，卸载比率
         super(CustomEnv, self).__init__()
         # self.action_space = gym.spaces.Dict(
         #     {
@@ -76,10 +79,31 @@ class CustomEnv(gym.Env):
         #         "offloading_rate": gym.spaces.Box(0, 1, dtype=np.float32),
         #     }
         # )
-        self.action_space = spaces.Box(
-            low=np.array([0, -np.pi, 0, 0], dtype=np.float32),  # 每个维度的最小值
-            high=np.array([19, np.pi, 1, 1], dtype=np.float32),  # 每个维度的最大值
-            dtype=np.float32,  # 数据类型
+        # self.action_space = spaces.Box(
+        #     low=np.array([0, -np.pi, 0, 0], dtype=np.float32),  # 每个维度的最小值
+        #     high=np.array([19, np.pi, 1, 1], dtype=np.float32),  # 每个维度的最大值
+        #     dtype=np.float32,  # 数据类型
+        # )
+        self.continues_dim = continues_dim  # 连续动作维度
+        self.continues_low = (
+            continues_low
+            if continues_low is not None
+            else np.array([-1.0, -np.pi, -1.0], dtype=np.float32)
+        )
+        self.continues_high = (
+            continues_high
+            if continues_high is not None
+            else np.array([1.0, np.pi, 1.0], dtype=np.float32)
+        )
+
+        self.action_space = spaces.Tuple(
+            spaces.Discrete(self.ue_num),  # UE选择
+            spaces.Box(
+                low=self.continues_low,
+                high=self.continues_high,
+                shape=(self.continues_dim,),  # 角度、距离、卸载率
+                dtype=np.float32,
+            ),
         )
 
         self.observation_space = gym.spaces.Box(
@@ -217,9 +241,10 @@ class CustomEnv(gym.Env):
         ue_id = int(np.round(action[0]))  # 离散动作取整
         ue_id = np.clip(ue_id, 0, 19)  # 确保范围有效
 
-        angle = float(action[1])  # 直接使用连续动作
-        distance = float(action[2])
-        offloading_ratio = float(action[3])
+        con_action = action[1]  # 连续动作部分
+        angle = float(con_action[1])  # 直接使用连续动作
+        distance = float(con_action[2])
+        offloading_ratio = float(con_action[3])
 
         terminated = False  # 是否终止
         truncated = False  # 是否被截断（如超时）
@@ -398,6 +423,7 @@ class CustomEnv(gym.Env):
         medium_num = int(self.ue_num * self.task_type_distribution["moderate"])
         heavy_num = int(self.ue_num * self.task_type_distribution["hpc"])
 
+        # 每个uenode的rng，在reset的时候都重新生成，这样能保证不同 episode 之间的随机性不同
         self.nodeList = (
             [
                 UENode(
