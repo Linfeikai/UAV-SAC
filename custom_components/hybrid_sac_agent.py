@@ -1,5 +1,3 @@
-# hybrid_sac_algorithm.py (或类似名称)
-
 from typing import Any, ClassVar, Optional, Type, TypeVar, Union, Dict, Tuple, List
 import warnings
 
@@ -9,10 +7,11 @@ from torch.nn import functional as F
 from gymnasium import spaces
 
 # 导入你的新 Policy 和 ReplayBuffer
-from hybrid_sac_policy import HybridSACPolicy
-from hybrid_replay_buffer import HybridReplayBuffer  # 确保这个类已正确实现
-from hybrid_actor import HybridActor
-from hybrid_critic import HybridCritic
+# The leading dot . indicates a relative import from the current package.
+from .hybrid_sac_policy import HybridSACPolicy
+from .hybrid_replay_buffer import HybridReplayBuffer  # 确保这个类已正确实现
+from .hybrid_actor import HybridActor
+from .hybrid_critic import HybridCritic
 
 
 from stable_baselines3.common.buffers import ReplayBuffer
@@ -40,7 +39,9 @@ from stable_baselines3.common.vec_env import VecEnv
 SelfHybridSAC = TypeVar("SelfHybridSAC", bound="HybridSAC")
 
 
-class HybridSAC(OffPolicyAlgorithm):  # 继承自原始 SAC
+class HybridSAC(
+    OffPolicyAlgorithm
+):  # 继承自SAC的父类OffPolicyAlgorithm 并override了他的一些方法
     """
     Soft Actor-Critic (SAC) for Hybrid Action Spaces.
     """
@@ -53,6 +54,8 @@ class HybridSAC(OffPolicyAlgorithm):  # 继承自原始 SAC
 
     # 注册你的 HybridSACPolicy
     policy_aliases: ClassVar[Dict[str, Type[BasePolicy]]] = {
+        # “声明一个类属性 policy_aliases，它是一个从字符串到策略类的映射（字典），
+        # 并且这些策略类都继承自 BasePolicy。”
         "HybridSACPolicy": HybridSACPolicy,
     }
 
@@ -132,11 +135,6 @@ class HybridSAC(OffPolicyAlgorithm):  # 继承自原始 SAC
             supported_action_spaces=(spaces.Tuple,),  # <--- 关键：声明支持 Tuple 空间
             support_multi_env=True,  # 支持多环境
         )
-        # print(
-        #     f"In HybridSAC __init__, does self have _logger? {hasattr(self, '_logger')}"
-        # )
-        # if hasattr(self, "_logger"):
-        #     print(f"self._logger is: {self._logger}")
 
         self.target_entropy = target_entropy
         self.log_ent_coef: Optional[th.Tensor] = None
@@ -399,14 +397,14 @@ class HybridSAC(OffPolicyAlgorithm):  # 继承自原始 SAC
             actions_tuple_batch, buffer_actions_tuple_batch = self._sample_action(
                 learning_starts, action_noise, env.num_envs
             )
-            print(f"actions_tuple_batch = {actions_tuple_batch}")
+
+            # print(f"actions_tuple_batch = {actions_tuple_batch}")
 
             # Reshape actions for env.step()
             # env.step() expects a list of actions, one for each environment.
             # For hybrid actions, each action in the list should be a tuple (discrete_action, continuous_action).
             # 2025/5/31 13:08 如果上面这三行注释是正确的话，那么在我修改完sample_action后，返回的
             # actions_tuple_batch 已经是符合要求的数据形式((每个环境的动作元组(离散动作, 连续动作)), (每个环境的动作元组(离散动作, 连续动作)))
-            # actions_for_env_step = list(actions_tuple_batch)
             actions_for_env_step: List[Tuple[Any, np.ndarray]] = []
             for i in range(env.num_envs):
                 # discrete part might be (n_envs, 1), continuous (n_envs, cont_dim)
@@ -420,9 +418,9 @@ class HybridSAC(OffPolicyAlgorithm):  # 继承自原始 SAC
                 cont_action_i = actions_tuple_batch[1][i]
                 actions_for_env_step.append((disc_action_i, cont_action_i))
 
-            print(
-                f"DEBUG_COLLECT_ROLLOUTS: actions_for_env_step = {actions_for_env_step}"
-            )
+            # print(
+            #     f"DEBUG_COLLECT_ROLLOUTS: actions_for_env_step = {actions_for_env_step}"
+            # )
             new_obs, rewards, dones, infos = env.step(actions_for_env_step)
 
             self.num_timesteps += env.num_envs
@@ -441,12 +439,6 @@ class HybridSAC(OffPolicyAlgorithm):  # 继承自原始 SAC
             # Retrieve reward and episode length if using Monitor wrapper
             self._update_info_buffer(infos, dones)
 
-            # 2025.5.30 17:37 因为store_transition逻辑修改，所以在存储前要进行修改
-            # 下面的改动是因为在 HybridReplayBuffer 中，我们需要存储动作的元组形式
-            # 详见HybridReplayBuffer的add方法
-            # buffer_actions_tuple_batch_transformed = self.reformat_actions_batch(
-            #     buffer_actions_tuple_batch
-            # )
             # Store data in replay buffer (normalized action and unnormalized observation)
             self._store_transition(
                 replay_buffer,
@@ -646,7 +638,6 @@ class HybridSAC(OffPolicyAlgorithm):  # 继承自原始 SAC
 
     def split_combined_actions(self, actions_iterable) -> Tuple[np.ndarray, np.ndarray]:
         # 这个函数和上面的 reformat_actions_batch是一样的，理论上没啥用
-        print()
         if isinstance(actions_iterable, (List, tuple)) and not actions_iterable:
             # 如果是空的或者不是列表或者元组
             return np.array([], dtype=np.int64), np.array([], dtype=np.float32)

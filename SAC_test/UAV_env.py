@@ -293,7 +293,7 @@ class Env(object):
     ue_num = 20  # UE设备的数量：20
     s = 1000  # 单位bit处理所需cpu圈数1000
 
-    state_dim = 88  # 状态空间维度 # 1 + 2 + 4 * ue_num + 2 = 87
+    state_dim = 86  # 状态空间维度 # 1 + 2 + 4 * ue_num + 2 = 87
     action_dim = 4
     max_action = (-1, 1)
 

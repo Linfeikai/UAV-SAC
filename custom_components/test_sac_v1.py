@@ -235,7 +235,7 @@ except Exception as e:
 
 def split_combined_actions(actions_iterable) -> Tuple[np.ndarray, np.ndarray]:
     # 这个函数和上面的 reformat_actions_batch是一样的，理论上没啥用
-    print()
+    # print()
     if isinstance(actions_iterable, (List, tuple)) and not actions_iterable:
         # 如果是空的或者不是列表或者元组
         return np.array([], dtype=np.int64), np.array([], dtype=np.float32)

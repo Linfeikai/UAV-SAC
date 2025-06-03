@@ -1,4 +1,5 @@
 from SAC_test.entities.custom_env import CustomEnv
+from custom_components.hybrid_sac_agent import HybridSAC
 import gymnasium as gym
 import optuna
 from optuna.visualization import plot_optimization_history, plot_param_importances
@@ -29,7 +30,7 @@ SEED = 42
 
 
 register(
-    id="UAVEnv-v0",
+    id="UAVEnv-v1",
     entry_point="SAC_test.entities.custom_env:CustomEnv",
     max_episode_steps=40,
 )
@@ -210,6 +211,45 @@ def SACtest():
 
     timestamp = int(time.time())
     model.save(f"sac_uav_model_{timestamp}")  # 使用时间戳保存模型
+
+
+def SAC_hybrid_test():
+    env1 = gym.make("UAVEnv-v1")
+    env1.reset(seed=SEED)  # 设置随机种子以确保可重复性
+
+    # 初始化 WandB
+    wandb.init(
+        project="UAV-SAC_1",  # 项目名称（wandb 仪表盘中显示）
+        name="experiment-SAC-hybrid",  # 实验名称（可选）
+        config={  # 记录超参数（可选）
+            "policy": "MlpPolicy",
+            "total_timesteps": 100000,
+        },
+        sync_tensorboard=True,  # auto-upload sb3's tensorboard metrics
+    )
+
+    metric_callback = EpisodeMetricCallback(verbose=1)
+    model = HybridSAC(
+        "HybridSACPolicy",  # 使用自己定义的策略
+        env1,
+        verbose=1,  # 打印训练日志
+        tensorboard_log="./sac_hybrid_logs",  # 保存日志用于TensorBoard可视化
+        gamma=0.99,  # 折扣因子 # 其实也是默认值
+        batch_size=256,  # 经验回放的批量大小 #默认值
+        learning_rate=3e-4,  # 学习率 #默认值
+        buffer_size=1_000_000,  # 经验回放的缓冲区大小  #默认值
+        tau=0.005,  # 软更新参数 #默认值
+    )
+    model.learn(
+        total_timesteps=100000,
+        callback=metric_callback,  # 显示进度条
+        log_interval=10,  # 每10步打印一次日志
+    )
+    wandb.finish()
+    import time
+
+    timestamp = int(time.time())
+    model.save(f"hybrid_sac_model_{timestamp}")  # 使用时间戳保存模型
 
 
 def TD3_test():
@@ -486,6 +526,7 @@ if __name__ == "__main__":
     # vv()
     # test_model()
     # TD3_test()
-    TD3_useThebest()
+    # TD3_useThebest()
+    SAC_hybrid_test()
     # find_best_hyperparameters()
     # find_best_hyperparameters_sweep()

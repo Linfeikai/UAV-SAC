@@ -11,7 +11,7 @@ import torch as th
 import torch.nn as nn
 from typing import Tuple, Any, Dict, List, Type
 from gymnasium import spaces
-from hybrid_distribution import make_hybrid_proba_distribution
+from .hybrid_distribution import make_hybrid_proba_distribution
 
 
 class HybridActor(BasePolicy):  # 为了更多控制，继承自 BasePolicy

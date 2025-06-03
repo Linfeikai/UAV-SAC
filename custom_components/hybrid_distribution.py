@@ -102,25 +102,25 @@ class HybridDistribution(Distribution):
         :return: self
         """
 
-        print("Inside HybridDistribution.proba_distribution:")  # DEBUG PRINT
-        print("Received discrete_logits:", discrete_logits)  # DEBUG PRINT
-        print(
-            "Received discrete_logits grad_fn:", discrete_logits.grad_fn
-        )  # DEBUG PRINT
+        # print("Inside HybridDistribution.proba_distribution:")  # DEBUG PRINT
+        # print("Received discrete_logits:", discrete_logits)  # DEBUG PRINT
+        # print(
+        #     "Received discrete_logits grad_fn:", discrete_logits.grad_fn
+        # )  # DEBUG PRINT
 
         # Clamp log_std for stability (important for SAC)
         clamped_log_std = th.clamp(continuous_log_std, LOG_STD_MIN, LOG_STD_MAX)
 
         # Set internal distributions using SB3 helpers
         self.cat_dist.proba_distribution(discrete_logits)
-        print(
-            "Logits in self.cat_dist.distribution AFTER call:",
-            self.cat_dist.distribution.logits,
-        )  # DEBUG PRINT
-        print(
-            "Logits grad_fn in self.cat_dist.distribution AFTER call:",
-            self.cat_dist.distribution.logits.grad_fn,
-        )  # DEBUG PRINT
+        # print(
+        #     "Logits in self.cat_dist.distribution AFTER call:",
+        #     self.cat_dist.distribution.logits,
+        # )  # DEBUG PRINT
+        # print(
+        #     "Logits grad_fn in self.cat_dist.distribution AFTER call:",
+        #     self.cat_dist.distribution.logits.grad_fn,
+        # )  # DEBUG PRINT
 
         self.squashed_gauss_dist.proba_distribution(continuous_mean, clamped_log_std)
 

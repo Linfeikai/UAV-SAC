@@ -20,8 +20,8 @@ from stable_baselines3.common.torch_layers import (
     get_actor_critic_arch,
 )
 from stable_baselines3.common.type_aliases import PyTorchObs, Schedule
-from hybrid_actor import HybridActor
-from hybrid_critic import HybridCritic
+from .hybrid_actor import HybridActor
+from .hybrid_critic import HybridCritic
 
 # CAP the standard deviation of the actor
 LOG_STD_MAX = 2
