@@ -4,6 +4,13 @@ output/
 model/
 sac_logs/
 td3_logs/
+wandb/
+td3_model/
+sac_hybrid_logs/
+hybridSAC_v0_model/
+hybridSAC_v1_model/
+hybridSAC_v2_model/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
