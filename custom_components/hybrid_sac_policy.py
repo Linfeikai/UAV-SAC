@@ -20,8 +20,11 @@ from stable_baselines3.common.torch_layers import (
     get_actor_critic_arch,
 )
 from stable_baselines3.common.type_aliases import PyTorchObs, Schedule
-from .hybrid_actor import HybridActor
-from .hybrid_critic import HybridCritic
+
+# from .hybrid_actor import HybridActor
+# from .hybrid_critic import HybridCritic
+from .hybrid_actor_v3 import HybridActor
+from .hybrid_critic_v3 import MultiHeadCritic
 
 # CAP the standard deviation of the actor
 LOG_STD_MAX = 2
@@ -30,8 +33,8 @@ LOG_STD_MIN = -20
 
 class HybridSACPolicy(BasePolicy):
     actor: HybridActor
-    critic: HybridCritic
-    critic_target: HybridCritic
+    critic: MultiHeadCritic
+    critic_target: MultiHeadCritic
 
     def __init__(
         self,
@@ -181,13 +184,13 @@ class HybridSACPolicy(BasePolicy):
 
     def make_critic(
         self, features_extractor: Optional[BaseFeaturesExtractor] = None
-    ) -> HybridCritic:
+    ) -> MultiHeadCritic:
         critic_kwargs = self._update_features_extractor(
             self.critic_kwargs, features_extractor
         )
         # 如果 HybridCritic 的 __init__ 不需要 features_dim，则不需要在这里手动添加
         # critic_kwargs["features_dim"] = critic_kwargs["features_extractor"].features_dim
-        return HybridCritic(**critic_kwargs).to(self.device)
+        return MultiHeadCritic(**critic_kwargs).to(self.device)
 
     def forward(
         self, obs: PyTorchObs, deterministic: bool = False

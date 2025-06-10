@@ -14,6 +14,7 @@ import wandb
 from wandb.integration.sb3 import WandbCallback
 
 import pandas as pd  # Optional, but helpful
+import os
 
 import numpy as np
 import torch
@@ -216,11 +217,12 @@ def SACtest():
 def SAC_hybrid_test():
     env1 = gym.make("UAVEnv-v1")
     env1.reset(seed=SEED)  # 设置随机种子以确保可重复性
-
+    log_dir = os.path.join("hybridSAC_v3_model", "logs")
+    os.makedirs(log_dir, exist_ok=True)  # 确保日志目录存在
     # 初始化 WandB
     wandb.init(
         project="UAV-SAC_1",  # 项目名称（wandb 仪表盘中显示）
-        name="experiment-SAC-hybrid",  # 实验名称（可选）
+        name="SAC-multiCritic",  # 实验名称（可选）
         config={  # 记录超参数（可选）
             "policy": "MlpPolicy",
             "total_timesteps": 100000,
@@ -233,7 +235,7 @@ def SAC_hybrid_test():
         "HybridSACPolicy",  # 使用自己定义的策略
         env1,
         verbose=1,  # 打印训练日志
-        tensorboard_log="./sac_hybrid_logs",  # 保存日志用于TensorBoard可视化
+        tensorboard_log=log_dir,  # 保存日志用于TensorBoard可视化
         gamma=0.99,  # 折扣因子 # 其实也是默认值
         batch_size=256,  # 经验回放的批量大小 #默认值
         learning_rate=3e-4,  # 学习率 #默认值
@@ -248,8 +250,11 @@ def SAC_hybrid_test():
     wandb.finish()
     import time
 
+    # 确保目标文件夹存在
     timestamp = int(time.time())
-    model.save(f"hybrid_sac_model_{timestamp}")  # 使用时间戳保存模型
+    save_dir = os.path.join("hybridSAC_v3_model", "models")
+    os.makedirs(save_dir, exist_ok=True)
+    model.save(os.path.join(save_dir, f"hybrid_sac_model_{timestamp}"))
 
 
 def TD3_test():

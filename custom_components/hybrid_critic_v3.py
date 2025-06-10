@@ -1,4 +1,5 @@
-import torch
+import torch as th
+
 import torch.nn as nn
 from gymnasium import spaces
 from typing import List, Type, Tuple
@@ -25,7 +26,7 @@ class QHead(nn.Module):
         self.q1 = nn.Sequential(*create_mlp(input_dim, 1, net_arch, activation_fn))
         self.q2 = nn.Sequential(*create_mlp(input_dim, 1, net_arch, activation_fn))
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
         return self.q1(x), self.q2(x)
 
 
@@ -39,24 +40,27 @@ class MultiHeadCritic(BaseModel):
         net_arch: List[int],
         features_extractor: BaseFeaturesExtractor,
         features_dim: int,  # 这个维度由Policy传入，是features_extractor的输出维度
+        continuous_action_dim: int,  # 这个参数可以不传，默认为0
+        n_critics: int = 2,  # 这个参数可以不传，默认为2
         activation_fn: Type[nn.Module] = nn.ReLU,
-        # 其他参数 (如 normalize_images) 会被父类处理
-        **kwargs,
+        normalize_images: bool = True,
+        share_features_extractor: bool = True,
     ):
         # 调用父类的构造函数，并把 features_extractor 传给它
         super().__init__(
             observation_space=observation_space,
             action_space=action_space,
             features_extractor=features_extractor,
-            **kwargs,
+            normalize_images=normalize_images,
         )
 
         # 从action_space中解析维度
         discrete_action_dim = action_space.spaces[0].n
-        continuous_action_dim = get_action_dim(action_space.spaces[1])
 
         self.discrete_action_dim = discrete_action_dim
 
+        self.n_critics = n_critics
+        self.share_features_extractor = share_features_extractor
         # Q头的输入维度现在基于 features_dim，而不是 state_dim
         q_head_input_dim = features_dim + continuous_action_dim
 
@@ -73,21 +77,23 @@ class MultiHeadCritic(BaseModel):
 
     def forward(
         self,
-        obs: torch.Tensor,  # --- 核心修改 4: forward输入现在是原始观测 obs ---
-        discrete_action: torch.Tensor,
-        continuous_action: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        obs: th.Tensor,  # --- 核心修改 4: forward输入现在是原始观测 obs ---
+        actions: Tuple[th.Tensor, th.Tensor],
+    ) -> Tuple[th.Tensor, th.Tensor]:
+        discrete_action, continuous_action = actions
         # --- 核心修改 5: 使用继承来的 self.extract_features 方法 ---
         # 不再直接使用obs，而是先提取特征
-        with torch.set_grad_enabled(False):  # 通常Critic的特征提取不计算梯度
-            features = self.extract_features(obs, self.features_extractor)
+        with th.set_grad_enabled(not self.share_features_extractor):
+            features = self.extract_features(
+                obs, self.features_extractor
+            )  # 在 SB3 3.0+ self.features_extractor 参数已移除
 
         # 后续逻辑保持不变，只是输入从 state 变为 features
-        input_features = torch.cat([features, continuous_action], dim=1)
+        input_features = th.cat([features, continuous_action], dim=1)
         batch_size = features.shape[0]
 
-        q1_all = torch.zeros(batch_size, 1, device=obs.device)
-        q2_all = torch.zeros(batch_size, 1, device=obs.device)
+        q1_all = th.zeros(batch_size, 1, device=obs.device)
+        q2_all = th.zeros(batch_size, 1, device=obs.device)
 
         for i in range(self.discrete_action_dim):
             batch_indices = (discrete_action.squeeze(-1) == i).nonzero(as_tuple=True)[0]
@@ -127,9 +133,9 @@ if __name__ == "__main__":
     # 4. 创建模拟数据
     batch_size = 32
     # 输入现在是 observation，而不是 state
-    obs_batch = torch.randn(batch_size, 128)
-    continuous_action_batch = torch.randn(batch_size, continuous_action_dim)
-    discrete_action_batch = torch.randint(0, discrete_action_dim, (batch_size, 1))
+    obs_batch = th.randn(batch_size, 128)
+    continuous_action_batch = th.randn(batch_size, continuous_action_dim)
+    discrete_action_batch = th.randint(0, discrete_action_dim, (batch_size, 1))
 
     # 5. 调用新的forward方法
     q1_outputs, q2_outputs = critic(

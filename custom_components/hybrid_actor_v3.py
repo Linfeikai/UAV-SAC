@@ -11,7 +11,7 @@ import torch as th
 import torch.nn as nn
 from typing import Tuple, Any, Dict, List, Type
 from gymnasium import spaces
-from .hybrid_distribution import make_hybrid_proba_distribution
+from .hybrid_distribution_v3 import make_hybrid_proba_distribution
 
 
 class HybridActor(BasePolicy):  # 为了更多控制，继承自 BasePolicy
@@ -145,7 +145,7 @@ class HybridActor(BasePolicy):  # 为了更多控制，继承自 BasePolicy
             means.append(mean)
 
         # 返回新的参数结构
-        return discrete_logits, means, log_stds
+        return discrete_logits, means, log_stds, {}
 
     def forward(
         self, obs: PyTorchObs, deterministic: bool = False
@@ -155,8 +155,8 @@ class HybridActor(BasePolicy):  # 为了更多控制，继承自 BasePolicy
         # 这里的action_dist是一个hybrid_distribution实例
         return self.action_dist.actions_from_params(
             discrete_logits,
-            continuous_mean=means,
-            continuous_log_std=log_stds,
+            continuous_means=means,
+            continuous_log_stds=log_stds,
             deterministic=deterministic,
             **kwargs,
         )
@@ -168,8 +168,8 @@ class HybridActor(BasePolicy):  # 为了更多控制，继承自 BasePolicy
         # log_prob_from_params 将采样动作并返回这些动作及其对数概率
         actions, log_prob = self.action_dist.log_prob_from_params(
             discrete_logits,
-            continuous_mean=means,
-            continuous_log_std=log_stds,
+            continuous_means=means,
+            continuous_log_stds=log_stds,
             **kwargs,
         )
         return actions, log_prob
