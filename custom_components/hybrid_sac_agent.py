@@ -742,7 +742,7 @@ class HybridSAC(
             assert self._last_obs is not None, "self._last_obs was not set"
             # predict() already handles unscaling for the environment if necessary
             unscaled_action, _ = self.predict(self._last_obs, deterministic=False)
-            unscaled_action = self.split_combined_actions(unscaled_action)
+            # unscaled_action = self.split_combined_actions(unscaled_action)
             # unscaled_action is already ( (batch_disc_np), (batch_cont_np) )
 
         # For SAC, action_noise is typically None.

@@ -116,6 +116,9 @@ class HybridSACPolicy(BasePolicy):
         self.critic_kwargs = self.net_args.copy()
         self.critic_kwargs.update(
             {
+                "continuous_action_dim": get_action_dim(
+                    self.action_space.spaces[1]
+                ),  # 连续动作的维度
                 "net_arch": critic_arch,
                 "n_critics": self.n_critics,
                 "share_features_extractor": self.share_features_extractor,  # Critic 需要知道是否共享
@@ -265,97 +268,90 @@ class HybridSACPolicy(BasePolicy):
         # 3. 从 self._predict 获取 PyTorch 张量形式的动作元组
         # self._predict 应该返回 (discrete_actions_th, continuous_actions_th)
         with th.no_grad():
-            discrete_actions_th, continuous_actions_th = self._predict(
-                obs_tensor, deterministic=deterministic
-            )
+            actions = self._predict(obs_tensor, deterministic=deterministic)
 
         # 4. 将 PyTorch 张量转换为 NumPy 数组
-        discrete_actions_np = discrete_actions_th.cpu().numpy()
-        continuous_actions_np = continuous_actions_th.cpu().numpy()
+        actions_np = (actions[0].cpu().numpy(), actions[1].cpu().numpy())
 
         # 5. 对连续动作部分进行反向缩放 (unscaling)
+        continuous_actions_np = actions_np[1]
+
         # SAC Actor (使用 SquashedDiagGaussianDistribution) 输出的连续动作在 [-1, 1] 范围内。
         # 如果环境的连续动作空间 (self.action_space.spaces[1]) 的边界不是 [-1, 1]，
         # 我们需要将动作从 [-1, 1] 映射回环境期望的 [low, high] 范围。
         # self.squash_output 在 BasePolicy 初始化时被设为 True (因为 SAC Actor 输出是压缩的)
 
         # 获取连续动作的子空间
-        continuous_action_subspace = self.action_space.spaces[1]
-        assert isinstance(continuous_action_subspace, spaces.Box), (
+        continuous_space = self.action_space.spaces[1]
+        assert isinstance(continuous_space, spaces.Box), (
             "The continuous part of the action space must be a Box."
         )
 
-        if self.squash_output:  # 对于SAC，这通常为True
-            # 检查环境的 Box 空间是否真的是 [-1, 1]
-            # 如果是，则不需要反向缩放。否则，进行反向缩放。
-            # (注意：BasePolicy.unscale_action 期望 self.action_space 是 Box，
-            #  所以我们不能直接用它。需要手动实现或适配。)
-            low = continuous_action_subspace.low
-            high = continuous_action_subspace.high
-
-            # 只有当 low/high 不是严格的 -1/1 时才进行 unscale
-            # 并且确保 low 和 high 的形状与 continuous_actions_np 兼容以进行广播
-            if not (np.allclose(low, -1.0) and np.allclose(high, 1.0)):
-                # 进行反向缩放: action = low + (0.5 * (scaled_action + 1.0) * (high - low))
-                continuous_actions_np = low + (
-                    0.5 * (continuous_actions_np + 1.0) * (high - low)
-                )
-            # 如果环境的 Box 空间已经是 [-1, 1]，则不需要做任何事，因为 Actor 输出已经是这个范围了。
-        else:
-            # 如果输出没有被压缩 (不常见于 SAC)，但可能超出了动作空间的有效范围，
-            # 则将其裁剪到 self.action_space.spaces[1].low 和 .high 之间。
-            continuous_actions_np = np.clip(
-                continuous_actions_np,
-                continuous_action_subspace.low,
-                continuous_action_subspace.high,
+        if self.squash_output:
+            # Unscale to the correct range
+            low, high = continuous_space.low, continuous_space.high
+            continuous_actions_np = low + (
+                0.5 * (continuous_actions_np + 1.0) * (high - low)
             )
-
-        # 6. 处理批处理维度 (如果输入不是批量观测)
+        # 如果不是矢量化环境，移除批处理维度
         if not vectorized_env:
-            # 移除批处理维度 (通常是第0维)
-            # 确保此时它们是 NumPy 数组
-            assert isinstance(discrete_actions_np, np.ndarray)
-            assert isinstance(continuous_actions_np, np.ndarray)
-
-            # discrete_actions_np 的形状可能是 (1,) 或 (1, 1)
-            # continuous_actions_np 的形状是 (1, continuous_dim)
-            # squeeze() 会移除所有大小为1的维度，如果只想移除第一个，用 squeeze(axis=0)
-            final_discrete_action = discrete_actions_np.squeeze(axis=0)
-            final_continuous_action = continuous_actions_np.squeeze(axis=0)
-
-            # 确保离散动作是标量整数（如果原始空间是 Discrete() 而不是 MultiDiscrete）
-            if (
-                isinstance(self.action_space.spaces[0], spaces.Discrete)
-                and final_discrete_action.ndim == 0
-            ):
-                pass  # 已经是标量了
-            elif (
-                final_discrete_action.ndim == 1
-                and final_discrete_action.shape[0] == 1
-                and isinstance(self.action_space.spaces[0], spaces.Discrete)
-            ):
-                final_discrete_action = final_discrete_action[
-                    0
-                ]  # 如果是 (1,) 形状的数组，取其元素
-
-            actions_output = (final_discrete_action, final_continuous_action)
+            discrete_action = actions_np[0].squeeze(axis=0)
+            continuous_action = continuous_actions_np.squeeze(axis=0)
+            # 确保离散动作是标量整数
+            if discrete_action.ndim == 0:
+                actions_output = (int(discrete_action), continuous_action)
+            else:
+                actions_output = (discrete_action, continuous_action)
         else:
-            # 如果是批量观测 (vectorized_env is True)，
-            # discrete_actions_np 的形状是 (batch_size,) 或 (batch_size, 1)
-            # continuous_actions_np 的形状是 (batch_size, continuous_dim)
-            # 我们直接返回这两个批量的 NumPy 数组组成的元组。
-            # 调用者 (例如 VecEnv) 需要知道如何处理这个动作元组。
-            # actions_output = (discrete_actions_np, continuous_actions_np)
-            # 在源代码的/common/vec_env/dummy_vec_env.py 的step_wait的函数中
-            # obs, self.buf_rews[env_idx], terminated, truncated, self.buf_infos[env_idx] = self.envs[env_idx].step(  # type: ignore[assignment]
-            #     self.actions[env_idx]
-            # )
-            # 他只能对actions取到第一个元素 所以我们返回的元素，必须一个元素就是一个动作元组
-            # 所以对他进行修改
-            actions_output = self.combine_specific_actions(
-                discrete_actions_np, continuous_actions_np
-            )
-        # 7. 返回动作和状态
+            # 如果是矢量化环境，返回两个NumPy数组的元组
+            actions_output = (actions_np[0], continuous_actions_np)
+
+        # # 6. 处理批处理维度 (如果输入不是批量观测)
+        # if not vectorized_env:
+        #     # 移除批处理维度 (通常是第0维)
+        #     # 确保此时它们是 NumPy 数组
+        #     assert isinstance(discrete_actions_np, np.ndarray)
+        #     assert isinstance(continuous_actions_np, np.ndarray)
+
+        #     # discrete_actions_np 的形状可能是 (1,) 或 (1, 1)
+        #     # continuous_actions_np 的形状是 (1, continuous_dim)
+        #     # squeeze() 会移除所有大小为1的维度，如果只想移除第一个，用 squeeze(axis=0)
+        #     final_discrete_action = discrete_actions_np.squeeze(axis=0)
+        #     final_continuous_action = continuous_actions_np.squeeze(axis=0)
+
+        #     # 确保离散动作是标量整数（如果原始空间是 Discrete() 而不是 MultiDiscrete）
+        #     if (
+        #         isinstance(self.action_space.spaces[0], spaces.Discrete)
+        #         and final_discrete_action.ndim == 0
+        #     ):
+        #         pass  # 已经是标量了
+        #     elif (
+        #         final_discrete_action.ndim == 1
+        #         and final_discrete_action.shape[0] == 1
+        #         and isinstance(self.action_space.spaces[0], spaces.Discrete)
+        #     ):
+        #         final_discrete_action = final_discrete_action[
+        #             0
+        #         ]  # 如果是 (1,) 形状的数组，取其元素
+
+        #     actions_output = (final_discrete_action, final_continuous_action)
+        # else:
+        #     # 如果是批量观测 (vectorized_env is True)，
+        #     # discrete_actions_np 的形状是 (batch_size,) 或 (batch_size, 1)
+        #     # continuous_actions_np 的形状是 (batch_size, continuous_dim)
+        #     # 我们直接返回这两个批量的 NumPy 数组组成的元组。
+        #     # 调用者 (例如 VecEnv) 需要知道如何处理这个动作元组。
+        #     # actions_output = (discrete_actions_np, continuous_actions_np)
+        #     # 在源代码的/common/vec_env/dummy_vec_env.py 的step_wait的函数中
+        #     # obs, self.buf_rews[env_idx], terminated, truncated, self.buf_infos[env_idx] = self.envs[env_idx].step(  # type: ignore[assignment]
+        #     #     self.actions[env_idx]
+        #     # )
+        #     # 他只能对actions取到第一个元素 所以我们返回的元素，必须一个元素就是一个动作元组
+        #     # 所以对他进行修改
+        #     actions_output = self.combine_specific_actions(
+        #         discrete_actions_np, continuous_actions_np
+        #     )
+        # # 7. 返回动作和状态
 
         return actions_output, state
 
