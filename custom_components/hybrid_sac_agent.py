@@ -582,6 +582,8 @@ class HybridSAC(
 
             self.actor.optimizer.zero_grad()
             actor_loss.backward()
+            # Clip gradient norm to prevent gradients from exploding
+            th.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
             self.actor.optimizer.step()
 
             # 更新目标网络
