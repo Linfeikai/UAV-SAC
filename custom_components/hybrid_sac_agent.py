@@ -568,6 +568,10 @@ class HybridSAC(
 
             self.critic.optimizer.zero_grad()
             critic_loss.backward()
+            th.nn.utils.clip_grad_norm_(
+                self.critic.parameters(), max_norm=10.0
+            )  # 裁剪Critic梯度
+
             self.critic.optimizer.step()
 
             # 计算 Actor 损失
