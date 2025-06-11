@@ -55,6 +55,8 @@ class HybridSACPolicy(BasePolicy):
         optimizer_kwargs: Optional[dict[str, Any]] = None,
         n_critics: int = 2,
         share_features_extractor: bool = True,  # 注意这里 SACPolicy 默认为 False，但通常共享更高效
+        lr_actor_schedule: Optional[Schedule] = None,
+        lr_critic_schedule: Optional[Schedule] = None,
     ):
         super().__init__(
             observation_space,
@@ -78,9 +80,11 @@ class HybridSACPolicy(BasePolicy):
         if net_arch is None:
             net_arch = [256, 256]  # 默认网络结构
 
-        self.lr_actor_schedule = optimizer_kwargs.pop("lr_actor_schedule", lr_schedule)
-        self.lr_critic_schedule = optimizer_kwargs.pop(
-            "lr_critic_schedule", lr_schedule
+        self.lr_actor_schedule = (
+            lr_actor_schedule if lr_actor_schedule is not None else lr_schedule
+        )
+        self.lr_critic_schedule = (
+            lr_critic_schedule if lr_critic_schedule is not None else lr_schedule
         )
 
         # 从 net_arch 中分离 actor 和 critic 的网络结构

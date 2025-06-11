@@ -597,8 +597,18 @@ class HybridSAC(
                 # polyak_update(self.batch_norm_stats, self.batch_norm_stats_target, 1.0)
 
         self._n_updates += gradient_steps
+        # --- 在这里添加新的日志记录 ---
+        # 从优化器中直接获取当前的学习率
+        # 这是标准的PyTorch做法
+        current_lr_actor = self.actor.optimizer.param_groups[0]["lr"]
+        current_lr_critic = self.critic.optimizer.param_groups[0]["lr"]
+
         # 日志记录部分可以基本保持不变
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
+        # 记录我们关心的两个独立学习率
+        self.logger.record("train/lr_actor", current_lr_actor)
+        self.logger.record("train/lr_critic", current_lr_critic)
+
         self.logger.record(
             "train/ent_coef", np.mean(ent_coefs)
         )  # <--- 使用 np.mean(ent_coefs)

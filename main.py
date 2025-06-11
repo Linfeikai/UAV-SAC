@@ -55,8 +55,8 @@ lr_critic_schedule = linear_schedule(lr_critic_initial)
 
 # 3.打包进policy_kwargs
 policy_kwargs = {
-    "actor_lr_schedule": lr_actor_schedule,
-    "critic_lr_schedule": lr_critic_schedule,
+    "lr_actor_schedule": lr_actor_schedule,
+    "lr_critic_schedule": lr_critic_schedule,
 }
 
 
