@@ -36,6 +36,29 @@ register(
     max_episode_steps=40,
 )
 
+# 1. 定义两个不同的初始学习率
+# Actor可以快一点，因为它需要探索。Critic必须稳，所以让它慢得多。
+lr_actor_initial = 3e-4  # 保持原来的值
+lr_critic_initial = 3e-5  # 降低一个数量级
+
+
+# 2. 为它们分别创建衰减函数
+def linear_schedule(initial_value: float):
+    def func(progress_remaining: float) -> float:
+        return progress_remaining * initial_value
+
+    return func
+
+
+lr_actor_schedule = linear_schedule(lr_actor_initial)
+lr_critic_schedule = linear_schedule(lr_critic_initial)
+
+# 3.打包进policy_kwargs
+policy_kwargs = {
+    "actor_lr_schedule": lr_actor_schedule,
+    "critic_lr_schedule": lr_critic_schedule,
+}
+
 
 class EpisodeMetricCallback(BaseCallback):
     def __init__(self, metrics_to_track: Optional[List[str]] = None, verbose: int = 0):
@@ -238,9 +261,10 @@ def SAC_hybrid_test():
         tensorboard_log=log_dir,  # 保存日志用于TensorBoard可视化
         gamma=0.99,  # 折扣因子 # 其实也是默认值
         batch_size=256,  # 经验回放的批量大小 #默认值
-        learning_rate=3e-4,  # 学习率 #默认值
+        learning_rate=lr_actor_initial,  # 学习率 #默认值
         buffer_size=1_000_000,  # 经验回放的缓冲区大小  #默认值
         tau=0.005,  # 软更新参数 #默认值
+        policy_kwargs=policy_kwargs,  # 使用自定义的学习率调度器
     )
     model.learn(
         total_timesteps=100000,

@@ -51,6 +51,7 @@ class HybridSACPolicy(BasePolicy):
         features_extractor_kwargs: Optional[dict[str, Any]] = None,
         normalize_images: bool = True,
         optimizer_class: type[th.optim.Optimizer] = th.optim.Adam,
+        # 这里可以接收到我们传入的优化器类和参数
         optimizer_kwargs: Optional[dict[str, Any]] = None,
         n_critics: int = 2,
         share_features_extractor: bool = True,  # 注意这里 SACPolicy 默认为 False，但通常共享更高效
@@ -76,6 +77,11 @@ class HybridSACPolicy(BasePolicy):
 
         if net_arch is None:
             net_arch = [256, 256]  # 默认网络结构
+
+        self.lr_actor_schedule = optimizer_kwargs.pop("lr_actor_schedule", lr_schedule)
+        self.lr_critic_schedule = optimizer_kwargs.pop(
+            "lr_critic_schedule", lr_schedule
+        )
 
         # 从 net_arch 中分离 actor 和 critic 的网络结构
         # get_actor_critic_arch 是一个辅助函数，如果 net_arch 是列表，则两者共享；
@@ -140,7 +146,8 @@ class HybridSACPolicy(BasePolicy):
         self.actor = self.make_actor()  # 使用 self.actor_kwargs
         self.actor.optimizer = self.optimizer_class(
             self.actor.parameters(),
-            lr=lr_schedule(1),  # type: ignore[call-arg]
+            # lr=lr_schedule(1),  # type: ignore[call-arg]
+            lr=self.lr_actor_schedule(1),  # type: ignore[call-arg]
             **self.optimizer_kwargs,
         )
         # 3. 创建 Critic
@@ -162,7 +169,8 @@ class HybridSACPolicy(BasePolicy):
 
         self.critic.optimizer = self.optimizer_class(
             critic_parameters,
-            lr=lr_schedule(1),  # type: ignore[call-arg]
+            # lr=lr_schedule(1),  # type: ignore[call-arg]
+            lr=self.lr_critic_schedule(1),  # type: ignore[call-arg]
             **self.optimizer_kwargs,
         )
         # 4. 创建 Target Critic 网络
