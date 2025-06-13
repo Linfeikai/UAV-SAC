@@ -14,7 +14,7 @@ from stable_baselines3.common.vec_env import SubprocVecEnv
 import random
 import wandb
 from wandb.integration.sb3 import WandbCallback
-from swanlab.integration.sb3 import SwanLabCallback
+# from swanlab.integration.sb3 import SwanLabCallback
 
 
 import pandas as pd  # Optional, but helpful
@@ -28,8 +28,8 @@ from gymnasium.wrappers import TimeLimit
 import warnings
 import swanlab
 
-# swanlab.sync_wandb()
-swanlab.sync_tensorboard_torch()
+swanlab.sync_wandb()
+# swanlab.sync_tensorboard_torch()
 
 warnings.filterwarnings("ignore")
 
@@ -108,7 +108,7 @@ class EpisodeMetricCallback(BaseCallback):
                 log_dict[f"episode/{metric}"] = mean_value  # 添加到 wandb 日志
                 values.clear()  # 清空当前episode的值
                 # self.current_episode_metrics[metric].clear()
-            swanlab.log(log_dict, step=self.episode_counter)  # 同步到 wandb
+            wandb.log(log_dict, step=self.episode_counter)  # 同步到 wandb
 
         return True
 
@@ -256,14 +256,15 @@ def SAC_hybrid_test():
     log_dir = os.path.join("hybridSAC_v3_model", "logs")
     os.makedirs(log_dir, exist_ok=True)  # 确保日志目录存在
     # 初始化 WandB
-    # swanlab.init(
-    #     project="UAV-SAC_1",  # 项目名称（wandb 仪表盘中显示）
-    #     name="SAC-multiCritic-local-testswanlab",  # 实验名称（可选）
-    #     config={  # 记录超参数（可选）
-    #         "policy": "MlpPolicy",
-    #         "total_timesteps": 1000,
-    #     },
-    # )
+    wandb.init(
+        project="UAV-SAC_1",  # 项目名称（wandb 仪表盘中显示）
+        name="SAC-multiCritic",  # 实验名称（可选）
+        config={  # 记录超参数（可选）
+            "policy": "MlpPolicy",
+            "total_timesteps": 100000,
+        },
+        sync_tensorboard=True,  # auto-upload sb3's tensorboard metrics
+    )
 
     metric_callback = EpisodeMetricCallback(verbose=1)
     # swanlab_callback = SwanLabCallback(
