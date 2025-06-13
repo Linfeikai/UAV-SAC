@@ -8,10 +8,14 @@ from stable_baselines3.common.env_checker import check_env
 from stable_baselines3 import SAC, TD3
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.evaluation import evaluate_policy
+from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.vec_env import SubprocVecEnv
 
 import random
 import wandb
 from wandb.integration.sb3 import WandbCallback
+from swanlab.integration.sb3 import SwanLabCallback
+
 
 import pandas as pd  # Optional, but helpful
 import os
@@ -22,6 +26,10 @@ from typing import Dict, List, Optional
 
 from gymnasium.wrappers import TimeLimit
 import warnings
+import swanlab
+
+# swanlab.sync_wandb()
+swanlab.sync_tensorboard_torch()
 
 warnings.filterwarnings("ignore")
 
@@ -100,7 +108,7 @@ class EpisodeMetricCallback(BaseCallback):
                 log_dict[f"episode/{metric}"] = mean_value  # 添加到 wandb 日志
                 values.clear()  # 清空当前episode的值
                 # self.current_episode_metrics[metric].clear()
-            wandb.log(log_dict, step=self.episode_counter)  # 同步到 wandb
+            swanlab.log(log_dict, step=self.episode_counter)  # 同步到 wandb
 
         return True
 
@@ -238,22 +246,33 @@ def SACtest():
 
 
 def SAC_hybrid_test():
-    env1 = gym.make("UAVEnv-v1")
-    env1.reset(seed=SEED)  # 设置随机种子以确保可重复性
+    env1 = make_vec_env(
+        "UAVEnv-v1",
+        n_envs=4,
+        vec_env_cls=SubprocVecEnv,  # 使用SubprocVecEnv来真正利用多核CPU
+        seed=SEED,  # 设置随机种子以确保可重复性
+    )
+    # env1.reset(seed=SEED)  # 设置随机种子以确保可重复性
     log_dir = os.path.join("hybridSAC_v3_model", "logs")
     os.makedirs(log_dir, exist_ok=True)  # 确保日志目录存在
     # 初始化 WandB
-    wandb.init(
-        project="UAV-SAC_1",  # 项目名称（wandb 仪表盘中显示）
-        name="SAC-multiCritic",  # 实验名称（可选）
-        config={  # 记录超参数（可选）
-            "policy": "MlpPolicy",
-            "total_timesteps": 100000,
-        },
-        sync_tensorboard=True,  # auto-upload sb3's tensorboard metrics
-    )
+    # swanlab.init(
+    #     project="UAV-SAC_1",  # 项目名称（wandb 仪表盘中显示）
+    #     name="SAC-multiCritic-local-testswanlab",  # 实验名称（可选）
+    #     config={  # 记录超参数（可选）
+    #         "policy": "MlpPolicy",
+    #         "total_timesteps": 1000,
+    #     },
+    # )
 
     metric_callback = EpisodeMetricCallback(verbose=1)
+    # swanlab_callback = SwanLabCallback(
+    #     project="UAV-SAC_1",  # 项目名称（wandb 仪表盘中显示）
+    #     experiment_name="multi-environment",  # 实验名称（可选）
+    #     verbose=1,  # 打印训练日志
+    #     tensorboard_log=log_dir,  # 保存日志用于TensorBoard可视化
+    # )
+    # callbacklist = CallbackList([metric_callback, swanlab_callback])
     model = HybridSAC(
         "HybridSACPolicy",  # 使用自己定义的策略
         env1,
@@ -261,9 +280,11 @@ def SAC_hybrid_test():
         tensorboard_log=log_dir,  # 保存日志用于TensorBoard可视化
         gamma=0.99,  # 折扣因子 # 其实也是默认值
         batch_size=256,  # 经验回放的批量大小 #默认值
-        learning_rate=lr_actor_initial,  # 学习率 #默认值
+        learning_rate=lr_actor_schedule,  # 学习率 #默认值
         buffer_size=1_000_000,  # 经验回放的缓冲区大小  #默认值
         tau=0.005,  # 软更新参数 #默认值
+        ent_coef=0.1,  # 自动调整熵系数
+        device="cuda",
         policy_kwargs=policy_kwargs,  # 使用自定义的学习率调度器
     )
     model.learn(
@@ -271,7 +292,7 @@ def SAC_hybrid_test():
         callback=metric_callback,  # 显示进度条
         log_interval=10,  # 每10步打印一次日志
     )
-    wandb.finish()
+    swanlab.finish()
     import time
 
     # 确保目标文件夹存在
