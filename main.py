@@ -248,7 +248,7 @@ def SACtest():
 def SAC_hybrid_test():
     env1 = make_vec_env(
         "UAVEnv-v1",
-        n_envs=4,
+        n_envs=8,
         vec_env_cls=SubprocVecEnv,  # 使用SubprocVecEnv来真正利用多核CPU
         seed=SEED,  # 设置随机种子以确保可重复性
     )
