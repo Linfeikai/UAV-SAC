@@ -258,7 +258,7 @@ def SAC_hybrid_test():
     # 初始化 WandB
     wandb.init(
         project="UAV-SAC_1",  # 项目名称（wandb 仪表盘中显示）
-        name="SAC-multiCritic",  # 实验名称（可选）
+        name="SAC-multiCritic-autodl",  # 实验名称（可选）
         config={  # 记录超参数（可选）
             "policy": "MlpPolicy",
             "total_timesteps": 100000,
@@ -281,7 +281,7 @@ def SAC_hybrid_test():
         tensorboard_log=log_dir,  # 保存日志用于TensorBoard可视化
         gamma=0.99,  # 折扣因子 # 其实也是默认值
         batch_size=256,  # 经验回放的批量大小 #默认值
-        learning_rate=lr_actor_schedule,  # 学习率 #默认值
+        learning_rate=1e-4,  # 学习率 #默认值
         buffer_size=1_000_000,  # 经验回放的缓冲区大小  #默认值
         tau=0.005,  # 软更新参数 #默认值
         ent_coef=0.1,  # 自动调整熵系数
