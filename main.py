@@ -67,68 +67,113 @@ policy_kwargs = {
     "lr_critic_schedule": lr_critic_schedule,
 }
 
+import numpy as np
+import wandb
+from stable_baselines3.common.callbacks import BaseCallback
+from typing import Optional, List, Dict, Any
 
-class EpisodeMetricCallback(BaseCallback):
+
+class ParallelEpisodeMetricCallback(BaseCallback):
+    """
+    A callback to correctly track and log metrics from multiple parallel environments.
+    It logs the mean of metrics for all episodes that finish in a given logging interval.
+    """
+
     def __init__(self, metrics_to_track: Optional[List[str]] = None, verbose: int = 0):
         """
         Args:
-        metrics_to_track: List of metric names to extract from `info` (e.g., ["delay", "flying_energy"]).
-                         If None, tracks all keys in `info`.
-
+            metrics_to_track: List of metric names from `info` to track (e.g., ["delay", "flying_energy"]).
+                              If None, all keys in `info` (excluding those starting with '_') will be tracked.
         """
-
         super().__init__(verbose)
-        self.episode_counter = 0  # 记录episode数量
-        self.metrics_to_track = metrics_to_track
-        self.episode_metrics: Dict[str, List[float]] = {}  # 存储所有episode的均值
-        self.current_episode_metrics: Dict[str, List[float]] = {}  # 当前episode的原始值
+        self.metrics_to_track: Optional[List[str]] = metrics_to_track
+
+        # (# NEW) 记录所有已完成 episode 的总数
+        self.total_episodes_finished = 0
+
+        # (# MODIFIED) 为每个并行环境维护一个独立的指标缓冲区
+        # 我们将在第一次调用 _on_step 时，根据环境数量来初始化它
+        self.env_metric_buffers: Optional[List[Dict[str, List[float]]]] = None
+
+    def _init_callback(self) -> None:
+        """
+        (# NEW) 在训练开始时初始化所有需要依赖环境信息的变量
+        """
+        # 从训练环境中获取并行环境的数量
+        num_envs = self.training_env.num_envs
+        # 为每个环境创建一个独立的字典，用于暂存当前 episode 的指标
+        self.env_metric_buffers = [{} for _ in range(num_envs)]
+
+        # 如果用户没有指定要追踪的指标，我们从环境中自动推断
+        if self.metrics_to_track is None:
+            # 运行一步来获取 info 字典的结构
+            # 注意：这假设所有环境的 info 结构都一样
+            _ = self.training_env.reset()
+            _, _, _, infos = self.training_env.step(
+                [self.training_env.action_space.sample() for _ in range(num_envs)]
+            )
+            self.metrics_to_track = [
+                k for k in infos[0].keys() if not k.startswith("_")
+            ]
+
+        # 初始化每个环境的缓冲区
+        for i in range(num_envs):
+            for metric in self.metrics_to_track:
+                self.env_metric_buffers[i][metric] = []
 
     def _on_step(self) -> bool:
-        # 从info中提取信息
-        info = self.locals["infos"][0]
-        done = self.locals["dones"][0]
+        # (# MODIFIED) 在第一次 on_step 时执行初始化
+        if self.env_metric_buffers is None:
+            self._init_callback()
 
-        # 首次运行时初始化字典
-        # {} 是一个已经实例化的对象（有地址），只是内容为空。这种情况下if not还是会判断为true
-        if not self.current_episode_metrics:
-            self._init_metrics(info)
+        # (# NEW) 用于收集在当前这一个 on_step 中所有已完成 episode 的指标均值
+        finished_episodes_metrics: Dict[str, List[float]] = {
+            metric: [] for metric in self.metrics_to_track
+        }
 
-        for metric in self.current_episode_metrics.keys():
-            self.current_episode_metrics[metric].append(info[metric])
+        # (# MODIFIED) 遍历每一个并行环境
+        for i in range(self.training_env.num_envs):
+            info = self.locals["infos"][i]
+            done = self.locals["dones"][i]
 
-        if done:
-            self.episode_counter += 1  # 增加episode数量
-            log_dict = {}  # 记录到wandb的字典
-            for metric, values in self.current_episode_metrics.items():
-                mean_value = np.mean(values) if values else 0.0
-                self.episode_metrics[metric].append(mean_value)
-                # self.logger.record(
-                #     f"episode/{metric}", mean_value, self.episode_counter
-                # )
-                log_dict[f"episode/{metric}"] = mean_value  # 添加到 wandb 日志
-                values.clear()  # 清空当前episode的值
-                # self.current_episode_metrics[metric].clear()
-            wandb.log(log_dict, step=self.episode_counter)  # 同步到 wandb
+            # 持续为每个环境的缓冲区收集数据
+            for metric in self.metrics_to_track:
+                # 确保 info 字典中有我们想追踪的 metric
+                if metric in info:
+                    self.env_metric_buffers[i][metric].append(info[metric])
+
+            # (# MODIFIED) 如果当前环境的 episode 结束了
+            if done:
+                self.total_episodes_finished += 1
+
+                # 计算这个刚结束的 episode 的各项指标的均值
+                for metric, values in self.env_metric_buffers[i].items():
+                    if values:
+                        mean_value = np.mean(values)
+                        finished_episodes_metrics[metric].append(mean_value)
+                        values.clear()  # 清空这个环境的缓冲区，为下一个 episode 做准备
+
+        # (# NEW) 在所有环境都检查完毕后，进行一次集中的日志记录
+        log_dict = {}
+        has_new_data = False
+
+        # 计算所有“刚刚完成的” episodes 的最终平均值
+        for metric, mean_list in finished_episodes_metrics.items():
+            if mean_list:
+                final_mean = np.mean(mean_list)
+                log_dict[f"episode/{metric}"] = final_mean
+                has_new_data = True
+
+        # 只有当这一步中至少有一个 episode 完成时，才记录日志
+        if has_new_data:
+            # 记录当前已完成的总 episode 数量
+            log_dict["rollout/total_episodes"] = self.total_episodes_finished
+
+            # (# MODIFIED) 使用 total_timesteps 作为 wandb 的横坐标 (x-axis)
+            # 这是 RL 中最规范、最标准的做法，可以正确反映样本效率
+            wandb.log(log_dict, step=self.num_timesteps)
 
         return True
-
-    def _init_metrics(self, info: Dict):
-        if self.metrics_to_track is None:
-            self.metrics_to_track = [
-                k for k in info.keys() if not k.startswith("_")
-            ]  # 排除内部字段
-
-        for metric in self.metrics_to_track:
-            self.episode_metrics[metric] = []  # 所有episode的均值
-            self.current_episode_metrics[metric] = []  # 当前episode的原始值
-
-    def get_metric(self, metric_name: str) -> List[float]:
-        """获取某个指标的历史记录"""
-        return self.episode_metrics.get(metric_name, [])
-
-    def get_all_metrics(self) -> Dict[str, List[float]]:
-        """获取所有指标的历史记录"""
-        return self.episode_metrics
 
 
 def objective(trial: optuna.Trial):
@@ -266,7 +311,7 @@ def SAC_hybrid_test():
         sync_tensorboard=True,  # auto-upload sb3's tensorboard metrics
     )
 
-    metric_callback = EpisodeMetricCallback(verbose=1)
+    metric_callback = ParallelEpisodeMetricCallback(verbose=1)
     # swanlab_callback = SwanLabCallback(
     #     project="UAV-SAC_1",  # 项目名称（wandb 仪表盘中显示）
     #     experiment_name="multi-environment",  # 实验名称（可选）
