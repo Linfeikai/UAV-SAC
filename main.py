@@ -43,6 +43,11 @@ register(
     entry_point="SAC_test.entities.custom_env:CustomEnv",
     max_episode_steps=40,
 )
+register(
+    id="UAVEnv-v0",
+    entry_point="SAC_test.entities.custom_env_sac:CustomEnv",
+    max_episode_steps=40,
+)
 
 # 1. 定义两个不同的初始学习率
 # Actor可以快一点，因为它需要探索。Critic必须稳，所以让它慢得多。
@@ -244,8 +249,14 @@ def find_best_hyperparameters_optuna():
 
 
 def SACtest():
-    env1 = gym.make("UAVEnv-v0")
-    env1.reset(seed=SEED)  # 设置随机种子以确保可重复性
+    env1 = make_vec_env(
+        "UAVEnv-v0",
+        n_envs=8,
+        vec_env_cls=SubprocVecEnv,  # 使用SubprocVecEnv来真正利用多核CPU
+        seed=SEED,  # 设置随机种子以确保可重复性
+    )
+    log_dir = os.path.join("SAC_v0_model", "logs")
+    os.makedirs(log_dir, exist_ok=True)  # 确保日志目录存在
 
     wandb.init(
         project="UAV-SAC_1",  # 项目名称（wandb 仪表盘中显示）
@@ -257,16 +268,16 @@ def SACtest():
         sync_tensorboard=True,  # auto-upload sb3's tensorboard metrics
     )
 
-    metric_callback = EpisodeMetricCallback(verbose=1)
+    metric_callback = ParallelEpisodeMetricCallback(verbose=1)
 
     # env1._get_obs()
-    check_env(env1.unwrapped, skip_render_check=True)
+    # check_env(env1.unwrapped, skip_render_check=True)
     # 初始化 SAC 模型
     model = SAC(
         "MlpPolicy",  # 使用多层感知机策略
         env1,
         verbose=1,  # 打印训练日志
-        tensorboard_log="./sac_logs",  # 保存日志用于TensorBoard可视化
+        tensorboard_log=log_dir,  # 保存日志用于TensorBoard可视化
         gamma=0.99,  # 折扣因子
         batch_size=256,  # 经验回放的批量大小
         learning_rate=3e-4,  # 学习率
@@ -286,8 +297,12 @@ def SACtest():
 
     import time
 
+
+    # 确保目标文件夹存在
     timestamp = int(time.time())
-    model.save(f"sac_uav_model_{timestamp}")  # 使用时间戳保存模型
+    save_dir = os.path.join("SAC_v0_model", "models")
+    os.makedirs(save_dir, exist_ok=True)
+    model.save(os.path.join(save_dir, f"sac_model_{timestamp}"))
 
 
 def SAC_hybrid_test():
@@ -326,7 +341,7 @@ def SAC_hybrid_test():
         tensorboard_log=log_dir,  # 保存日志用于TensorBoard可视化
         gamma=0.99,  # 折扣因子 # 其实也是默认值
         batch_size=256,  # 经验回放的批量大小 #默认值
-        learning_rate=1e-4,  # 学习率 #默认值
+        learning_rate=3e-4,  # 学习率 #默认值
         buffer_size=1_000_000,  # 经验回放的缓冲区大小  #默认值
         tau=0.005,  # 软更新参数 #默认值
         ent_coef=0.1,  # 自动调整熵系数
@@ -623,6 +638,25 @@ if __name__ == "__main__":
     # test_model()
     # TD3_test()
     # TD3_useThebest()
-    SAC_hybrid_test()
+    SACtest()
+    # SAC_hybrid_test()
     # find_best_hyperparameters()
     # find_best_hyperparameters_sweep()
+# Use gymnasium.make for this, not make_vec_env
+    # print("1️⃣  Creating a single environment instance to check...")
+    # try:
+    #     single_env = gym.make("UAVEnv-v0")
+    # except Exception as e:
+    #     print(f"❌ Error creating single environment: {e}")
+    #     # Exit or handle the error, as the rest will fail
+    #     exit()
+
+    # # --- Step 2: Run check_env on that SINGLE instance ---
+    # print("2️⃣  Running environment checker...")
+    # try:
+    #     check_env(single_env, skip_render_check=True)
+    #     print("✅✅✅ Environment check passed successfully! ✅✅✅")
+    # except Exception as e:
+    #     print(f"❌❌❌ Environment check failed: {e} ❌❌❌")
+    #     # Exit or handle the error, as you shouldn't train a broken environment
+    #     exit()
