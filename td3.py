@@ -1,0 +1,290 @@
+import wandb
+import gymnasium as gym
+from stable_baselines3 import TD3
+from stable_baselines3.common.env_checker import check_env
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList
+
+
+SEED = 42
+
+
+class ParallelEpisodeMetricCallback(BaseCallback):
+    """
+    A callback to correctly track and log metrics from multiple parallel environments.
+    It logs the mean of metrics for all episodes that finish in a given logging interval.
+    """
+
+    def __init__(self, metrics_to_track: Optional[List[str]] = None, verbose: int = 0):
+        """
+        Args:
+            metrics_to_track: List of metric names from `info` to track (e.g., ["delay", "flying_energy"]).
+                              If None, all keys in `info` (excluding those starting with '_') will be tracked.
+        """
+        super().__init__(verbose)
+        self.metrics_to_track: Optional[List[str]] = metrics_to_track
+
+        # (# NEW) 记录所有已完成 episode 的总数
+        self.total_episodes_finished = 0
+
+        # (# MODIFIED) 为每个并行环境维护一个独立的指标缓冲区
+        # 我们将在第一次调用 _on_step 时，根据环境数量来初始化它
+        self.env_metric_buffers: Optional[List[Dict[str, List[float]]]] = None
+
+    def _init_callback(self) -> None:
+        """
+        (# NEW) 在训练开始时初始化所有需要依赖环境信息的变量
+        """
+        # 从训练环境中获取并行环境的数量
+        num_envs = self.training_env.num_envs
+        # 为每个环境创建一个独立的字典，用于暂存当前 episode 的指标
+        self.env_metric_buffers = [{} for _ in range(num_envs)]
+
+        # 如果用户没有指定要追踪的指标，我们从环境中自动推断
+        if self.metrics_to_track is None:
+            # 运行一步来获取 info 字典的结构
+            # 注意：这假设所有环境的 info 结构都一样
+            _ = self.training_env.reset()
+            _, _, _, infos = self.training_env.step(
+                [self.training_env.action_space.sample() for _ in range(num_envs)]
+            )
+            self.metrics_to_track = [
+                k for k in infos[0].keys() if not k.startswith("_")
+            ]
+
+        # 初始化每个环境的缓冲区
+        for i in range(num_envs):
+            for metric in self.metrics_to_track:
+                self.env_metric_buffers[i][metric] = []
+
+    def _on_step(self) -> bool:
+        # (# MODIFIED) 在第一次 on_step 时执行初始化
+        if self.env_metric_buffers is None:
+            self._init_callback()
+
+        # (# NEW) 用于收集在当前这一个 on_step 中所有已完成 episode 的指标均值
+        finished_episodes_metrics: Dict[str, List[float]] = {
+            metric: [] for metric in self.metrics_to_track
+        }
+
+        # (# MODIFIED) 遍历每一个并行环境
+        for i in range(self.training_env.num_envs):
+            info = self.locals["infos"][i]
+            done = self.locals["dones"][i]
+
+            # 持续为每个环境的缓冲区收集数据
+            for metric in self.metrics_to_track:
+                # 确保 info 字典中有我们想追踪的 metric
+                if metric in info:
+                    self.env_metric_buffers[i][metric].append(info[metric])
+
+            # (# MODIFIED) 如果当前环境的 episode 结束了
+            if done:
+                self.total_episodes_finished += 1
+
+                # 计算这个刚结束的 episode 的各项指标的均值
+                for metric, values in self.env_metric_buffers[i].items():
+                    if values:
+                        mean_value = np.mean(values)
+                        finished_episodes_metrics[metric].append(mean_value)
+                        values.clear()  # 清空这个环境的缓冲区，为下一个 episode 做准备
+
+        # (# NEW) 在所有环境都检查完毕后，进行一次集中的日志记录
+        log_dict = {}
+        has_new_data = False
+
+        # 计算所有“刚刚完成的” episodes 的最终平均值
+        for metric, mean_list in finished_episodes_metrics.items():
+            if mean_list:
+                final_mean = np.mean(mean_list)
+                log_dict[f"episode/{metric}"] = final_mean
+                has_new_data = True
+
+        # 只有当这一步中至少有一个 episode 完成时，才记录日志
+        if has_new_data:
+            # 记录当前已完成的总 episode 数量
+            log_dict["rollout/total_episodes"] = self.total_episodes_finished
+
+            # (# MODIFIED) 使用 total_timesteps 作为 wandb 的横坐标 (x-axis)
+            # 这是 RL 中最规范、最标准的做法，可以正确反映样本效率
+            wandb.log(log_dict, step=self.num_timesteps)
+
+        return True
+
+
+def TD3_test():
+    print("当前模式:", "Sweep" if wandb.config else "普通训练")
+    print("传入的 config:", wandb.config)  # 检查是否收到参数
+
+    run = wandb.init(
+        project="UAV-SAC_1",  # 项目名称（wandb 仪表盘中显示）
+        name="experiment-TD3-2",  # 实验名称（可选）
+        config=wandb.config,  # 接收sweep传入的参数
+        sync_tensorboard=True,
+        monitor_gym=True,  # 自动记录环境指标
+    )
+
+    env = gym.make("UAVEnv-v0")
+    env.reset(seed=SEED)  # 设置随机种子以确保可重复性
+    check_env(env.unwrapped, skip_render_check=True)
+
+    # 使用config中的参数（sweep模式）或默认值（普通训练）
+    params = {
+        "gamma": wandb.config.gamma if wandb.config else 0.99,
+        "batch_size": wandb.config.batch_size if wandb.config else 64,
+        "learning_rate": wandb.config.learning_rate if wandb.config else 3e-4,
+        "buffer_size": wandb.config.buffer_size if wandb.config else 300_000,
+        "tau": wandb.config.tau if wandb.config else 0.003,
+        "policy_delay": wandb.config.policy_delay if wandb.config else 4,
+        "target_policy_noise": wandb.config.target_policy_noise
+        if wandb.config
+        else 0.3,
+        "target_noise_clip": wandb.config.target_noise_clip if wandb.config else 0.5,
+    }
+    policy_kwargs = {}
+    if wandb.config and hasattr(wandb.config, "net_arch"):
+        policy_kwargs["net_arch"] = wandb.config.net_arch
+
+    callbacks = [
+        ParallelEpisodeMetricCallback(verbose=1),
+    ]
+
+    # 初始化 SAC 模型
+    model = TD3(
+        "MlpPolicy",  # 使用多层感知机策略
+        env,
+        verbose=1,  # 打印训练日志
+        tensorboard_log=f"./TD3_logs/{run.id}",
+        **params,
+        policy_kwargs=policy_kwargs if policy_kwargs else None,
+    )
+
+    # 训练模型（带进度条）
+    model.learn(
+        total_timesteps=10000,
+        callback=CallbackList(callbacks),  # 显示进度条
+        log_interval=10,  # 每10步打印一次日志
+    )
+
+    # 保存模型
+    model.save(f"TD3_uav_model_{run.id}")
+    wandb.finish()
+
+
+def TD3_useThebest():
+    entity = "SACtest"
+    # The name of your W&B project
+    project = "UAV-TD3-Optimization"
+    # The sweep ID you have (tn145nan)
+    sweep_id = "zfinb4uk"
+    # The metric you want to maximize (e.g., average episode reward)
+    # Check your W&B run pages to confirm the exact name logged by SB3
+    metric_to_optimize = "rollout/ep_rew_mean"
+    api = wandb.Api()
+    try:
+        sweep = api.sweep(f"{entity}/{project}/{sweep_id}")
+        print(f"Successfully accessed sweep: {sweep.name} ({sweep_id})")
+    except Exception as e:
+        print(f"Error accessing sweep {entity}/{project}/{sweep_id}: {e}")
+        print("Please check your entity, project name, and sweep ID.")
+        exit()  # Exit if sweep cannot be accessed
+
+    print(f"Fetching runs for sweep...")
+
+    best_run = None
+    best_metric_value = -float("inf")  # Initialize for maximization
+
+    runs_data = []  # To store data for potential DataFrame
+    for run in sweep.runs:
+        # Access summary metrics (usually contains the last value logged)
+        summary = run.summary
+
+        # Access configuration (hyperparameters)
+        config = run.config
+
+        # Check if the metric exists in the summary and is a number
+        if metric_to_optimize in summary and isinstance(
+            summary[metric_to_optimize], (int, float)
+        ):
+            metric_value = summary[metric_to_optimize]
+
+            # print(f"Run {run.name} ({run.id}): {metric_to_optimize} = {metric_value}") # Uncomment to see each run's metric
+
+            # Check if this run is better than the current best
+            if metric_value > best_metric_value:
+                best_metric_value = metric_value
+                best_run = run
+
+            # Store basic info and config
+            runs_data.append(
+                {
+                    "run_id": run.id,
+                    "run_name": run.name,
+                    "metric_value": metric_value,
+                    "config": config,
+                }
+            )
+        # else:
+        # print(f"Run {run.name} ({run.id}): Metric '{metric_to_optimize}' not found or not a number in summary.")
+
+    if best_run:
+        print("\n--- Best Run Found ---")
+        print(f"Run Name: {best_run.name}")
+        print(f"Run ID: {best_run.id}")
+        print(f"Best {metric_to_optimize}: {best_metric_value}")
+        print("\nHyperparameters (Config):")
+        best_config = {}
+        policy_kwargs = {}
+        print(f"Policy Architecture: {policy_kwargs}")
+        for key, value in best_run.config.items():
+            # Skip wandb internal keys if necessary
+            if not key.startswith("_"):
+                if key == "net_arch":
+                    policy_kwargs[key] = value
+                    continue
+                best_config[key] = value
+                print(f"  {key}: {value}")
+
+        if best_config:
+            print("\n--- Training Final Model with Best Config ---")
+            env = gym.make("UAVEnv-v0")
+            env.reset(seed=SEED)  # 设置随机种子以确保可重复性
+            check_env(env.unwrapped, skip_render_check=True)
+            run = wandb.init(
+                project="UAV-SAC_1",  # 项目名称（wandb 仪表盘中显示）
+                name="experiment-TD3-2",
+                sync_tensorboard=True,
+            )  # 实验名称（可选）
+            model = TD3(
+                "MlpPolicy",
+                env,
+                verbose=1,
+                tensorboard_log=f"./TD3_logs/{best_run.id}",
+                **best_config,
+                policy_kwargs=policy_kwargs if policy_kwargs else None,
+            )
+            model.learn(
+                total_timesteps=100000,
+                callback=EpisodeMetricCallback(verbose=1),
+                log_interval=10,
+            )
+            model.save(f"TD3_uav_model_{best_run.id}")
+
+        # The `best_config` dictionary now contains the hyperparameters
+        # of the run that achieved the best value for your specified metric.
+
+        # Optional: Create a DataFrame to inspect all runs' final metrics and config
+    #     if runs_data:
+    #         df = pd.DataFrame(runs_data)
+    #         # Sort to see top runs
+    #         df_sorted = df.sort_values(by="metric_value", ascending=False)
+    #         print("\n--- Top 5 Runs by Metric ---")
+    #         print(
+    #             df_sorted[["run_name", "metric_value"]].head().to_markdown(index=False)
+    #         )
+    #         # df_sorted.to_csv("sweep_results.csv", index=False) # Save results to CSV
+
+    # else:
+    #     print(
+    #         f"\nNo runs found in the sweep, or metric '{metric_to_optimize}' was not logged correctly in any run."
+    #     )
+    #     best_config = None  # Ensure best_config is None if no best run was found
