@@ -484,6 +484,23 @@ class HybridSAC(
 
         # 切换到训练模式
         self.policy.set_training_mode(True)
+
+        #  黄金标准：在训练循环的开始，手动更新学习率 ---
+        # 1. 计算当前剩余进度
+        self._update_current_progress_remaining(self.num_timesteps, self._total_timesteps)
+        progress_remaining = self._current_progress_remaining
+
+        # 2. 从保存在Policy中的、独立的调度函数获取当前的学习率
+        new_lr_actor = self.policy.lr_actor_schedule(progress_remaining)
+        new_lr_critic = self.policy.lr_critic_schedule(progress_remaining)
+
+        # 3. 将新学习率应用到优化器
+        for param_group in self.actor.optimizer.param_groups:
+            param_group["lr"] = new_lr_actor
+        for param_group in self.critic.optimizer.param_groups:
+            param_group["lr"] = new_lr_critic
+        # --- 学习率更新逻辑结束 ---
+
         # 更新优化器学习率
         optimizers = [self.actor.optimizer, self.critic.optimizer]
         if self.ent_coef_optimizer is not None:
