@@ -139,9 +139,9 @@ class HybridSACPolicy(BasePolicy):
         )
 
         # 调用 _build 来创建网络和优化器
-        self._build(lr_schedule)
+        self._build()
 
-    def _build(self, lr_schedule: Schedule) -> None:
+    def _build(self) -> None:
         if self.features_extractor is None:  # 检查 BasePolicy 是否已经创建了
             self.features_extractor = self.make_features_extractor()
 
