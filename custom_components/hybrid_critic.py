@@ -36,6 +36,7 @@ class HybridCritic(BaseModel):  # 或者 nn.Module
         net_arch: List[int],  # Python 3.9+可以用 list[int]
         features_extractor: BaseFeaturesExtractor,
         features_dim: int,
+        embedding_dim: int = 32,  # 修改一：嵌入层，添加这个参数
         activation_fn: Type[nn.Module] = nn.ReLU,  # Python 3.9+可以用 type[nn.Module]
         normalize_images: bool = True,
         n_critics: int = 2,
@@ -55,31 +56,29 @@ class HybridCritic(BaseModel):  # 或者 nn.Module
 
         self.discrete_action_space = action_space.spaces[0]
         self.continuous_action_space = action_space.spaces[1]
+
         self.features_dim = features_dim
+
+        discrete_action_dim = self.discrete_action_space.n
+        continuous_action_dim = get_action_dim(self.continuous_action_space)
 
         if not isinstance(self.discrete_action_space, spaces.Discrete):
             raise ValueError("First element of action_space Tuple must be Discrete.")
         if not isinstance(self.continuous_action_space, spaces.Box):
             raise ValueError("Second element of action_space Tuple must be Box.")
 
-        # 维度计算
-        self.discrete_action_dim = int(self.discrete_action_space.n)
-        # 使用one-hot编码，所以离散动作的输入维度是其类别数
-        self.one_hot_discrete_action_dim = self.discrete_action_dim
-        self.continuous_action_dim = get_action_dim(self.continuous_action_space)
+        # --- 核心修改 2: 创建一个可学习的嵌入层 ---
+        # 这是我们的“智能档案袋”
+        self.action_embedding = nn.Embedding(discrete_action_dim, embedding_dim)
 
-        self.share_features_extractor = share_features_extractor
-        self.n_critics = n_critics
-        self.q_networks: List[nn.Module] = []  # Python 3.9+可以用 list[nn.Module]
+        self.q_networks: List[nn.Module] = []
 
-        # 总的动作相关输入维度 = one-hot离散动作维度 + 连续动作维度
-        total_action_related_dim = (
-            self.one_hot_discrete_action_dim + self.continuous_action_dim
-        )
+        # --- 核心修改 3: 计算新的Q网络输入维度 ---
+        # 新的维度 = 状态特征 + 动作嵌入 + 连续动作
+        q_net_input_dim = features_dim + embedding_dim + continuous_action_dim
 
         for idx in range(n_critics):
-            # Q网络的输入维度 = 状态特征维度 + 总的动作相关输入维度
-            q_net_input_dim = self.features_dim + total_action_related_dim
+            # 使用新的输入维度创建Q网络
             q_net_list = create_mlp(q_net_input_dim, 1, net_arch, activation_fn)
             q_net = nn.Sequential(*q_net_list)
             self.add_module(f"qf{idx}", q_net)
@@ -89,66 +88,45 @@ class HybridCritic(BaseModel):  # 或者 nn.Module
         self, obs: th.Tensor, actions: Tuple[th.Tensor, th.Tensor]
     ) -> Tuple[th.Tensor, ...]:
         """
-        :param obs: Observations
-        :param actions: Tuple of (discrete_actions, continuous_actions)
-                        discrete_actions: Tensor of shape (batch_size, 1) or (batch_size,) with integer action indices.
-                        continuous_actions: Tensor of shape (batch_size, continuous_action_dim).
-        :return: Tuple of Q-values from each critic network.
+        :param obs: 观测
+        :param actions: 动作元组 (discrete_actions, continuous_actions)
+        :return: 每个Q网络的Q值输出元组
         """
+        # --- 核心修改 4: 全新的前向传播逻辑 ---
+
+        # 1. 解包动作
         discrete_actions, continuous_actions = actions
 
-        # 确保离散动作是 LongTensor 以用于 one_hot
-        discrete_actions = discrete_actions.long()
-        if (
-            discrete_actions.ndim == 1
-        ):  # 如果是 (batch_size,)，增加一个维度变为 (batch_size, 1)
-            discrete_actions = discrete_actions.unsqueeze(1)
+        # 确保离散动作为Long类型以便查询嵌入层
+        # .squeeze(-1)是为了处理(B, 1) -> (B,)的形状，以匹配embedding层的输入要求
+        discrete_actions_long = discrete_actions.long().squeeze(-1)
 
-        # 将离散动作转换为 one-hot 编码
-        # discrete_actions 应该是 (batch_size, 1) 包含类别索引
-        # self.discrete_action_dim 是类别的数量
-        discrete_actions_one_hot = th.nn.functional.one_hot(
-            discrete_actions.squeeze(1), num_classes=self.discrete_action_dim
-        ).float()
-        # discrete_actions_one_hot 的形状将是 (batch_size, self.discrete_action_dim)
-
+        # 2. 提取状态特征 (使用父类的方法)
         with th.set_grad_enabled(not self.share_features_extractor):
-            features = self.extract_features(
-                obs, self.features_extractor
-            )  # 在 SB3 3.0+ self.features_extractor 参数已移除
+            features = self.extract_features(obs, self.features_extractor)
 
-        # 拼接: 状态特征, one-hot离散动作, 连续动作
-        qvalue_input = th.cat(
-            [features, discrete_actions_one_hot, continuous_actions], dim=1
-        )
+        # 3. 查询离散动作的嵌入向量
+        action_embeds = self.action_embedding(discrete_actions_long)
 
+        # 4. 拼接所有信息作为Q网络的输入
+        qvalue_input = th.cat([features, action_embeds, continuous_actions], dim=1)
+
+        # 5. 将整合后的特征送入两个Q网络并返回结果
         return tuple(q_net(qvalue_input) for q_net in self.q_networks)
 
     def q1_forward(
         self, obs: th.Tensor, actions: Tuple[th.Tensor, th.Tensor]
     ) -> th.Tensor:
-        """
-        Only predict the Q-value using the first network.
-        """
+        """只用第一个Q网络进行前向传播，主要用于Actor更新。"""
+        # 这里的逻辑与forward完全一致，只是只返回第一个网络的输出
         discrete_actions, continuous_actions = actions
-        discrete_actions = discrete_actions.long()
-        if discrete_actions.ndim == 1:
-            discrete_actions = discrete_actions.unsqueeze(1)
+        discrete_actions_long = discrete_actions.long().squeeze(-1)
 
-        discrete_actions_one_hot = th.nn.functional.one_hot(
-            discrete_actions.squeeze(1), num_classes=self.discrete_action_dim
-        ).float()
+        with th.no_grad():
+            features = self.extract_features(obs, self.features_extractor)
+            action_embeds = self.action_embedding(discrete_actions_long)
 
-        with (
-            th.no_grad()
-        ):  # 在SB3 3.0+中，extract_features通常在no_grad上下文之外，因为它可能被训练
-            features = self.extract_features(
-                obs, self.features_extractor
-            )  # 在 SB3 3.0+ self.features_extractor 参数已移除
-
-        qvalue_input = th.cat(
-            [features, discrete_actions_one_hot, continuous_actions], dim=1
-        )
+        qvalue_input = th.cat([features, action_embeds, continuous_actions], dim=1)
         return self.q_networks[0](qvalue_input)
 
     # 如果你的BaseModel没有实现_get_constructor_parameters，你可能需要添加它

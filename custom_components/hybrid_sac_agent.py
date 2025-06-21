@@ -11,10 +11,8 @@ from gymnasium import spaces
 from .hybrid_sac_policy import HybridSACPolicy
 from .hybrid_replay_buffer import HybridReplayBuffer  # 确保这个类已正确实现
 
-# from .hybrid_actor import HybridActor
-# from .hybrid_critic import HybridCritic
-from .hybrid_actor_v3 import HybridActor
-from .hybrid_critic_v3 import MultiHeadCritic
+from .hybrid_actor import HybridActor
+from .hybrid_critic import HybridCritic
 
 
 from stable_baselines3.common.buffers import ReplayBuffer
@@ -52,8 +50,8 @@ class HybridSAC(
     # 指定新的默认策略
     policy: HybridSACPolicy  # 这个类型提示需要调整，因为父类有具体的 SACPolicy
     actor: HybridActor  # 父类有 Actor
-    critic: MultiHeadCritic  # 父类是nn.module
-    critic_target: MultiHeadCritic  # 父类是nn.module
+    critic: HybridCritic  # 父类是nn.module
+    critic_target: HybridCritic  # 父类是nn.module
 
     # 注册你的 HybridSACPolicy
     policy_aliases: ClassVar[Dict[str, Type[BasePolicy]]] = {
@@ -182,13 +180,13 @@ class HybridSAC(
         # (这一步更多是用于开发者确认和调试，如果 policy 创建正确，类型应该匹配)
         if not isinstance(self.actor, HybridActor):
             warnings.warn(f"Expected actor to be HybridActor, got {type(self.actor)}")
-        if not isinstance(self.critic, MultiHeadCritic):
+        if not isinstance(self.critic, HybridCritic):
             warnings.warn(
-                f"Expected critic to be MultiHeadCritic, got {type(self.critic)}"
+                f"Expected critic to be HybridCritic, got {type(self.critic)}"
             )
-        if not isinstance(self.critic_target, MultiHeadCritic):
+        if not isinstance(self.critic_target, HybridCritic):
             warnings.warn(
-                f"Expected critic_target to be MultiHeadCritic, got {type(self.critic_target)}"
+                f"Expected critic_target to be HybridCritic, got {type(self.critic_target)}"
             )
 
         # 调整 Target Entropy 的计算
@@ -259,11 +257,11 @@ class HybridSAC(
         assert isinstance(self.policy.actor, HybridActor), (
             "Policy's actor is not a HybridActor"
         )
-        assert isinstance(self.policy.critic, MultiHeadCritic), (
-            "Policy's critic is not a MultiHeadCritic"
+        assert isinstance(self.policy.critic, HybridCritic), (
+            "Policy's critic is not a HybridCritic"
         )
-        assert isinstance(self.policy.critic_target, MultiHeadCritic), (
-            "Policy's critic_target is not a MultiHeadCritic"
+        assert isinstance(self.policy.critic_target, HybridCritic), (
+            "Policy's critic_target is not a HybridCritic"
         )
 
         self.actor = self.policy.actor
@@ -487,7 +485,9 @@ class HybridSAC(
 
         #  黄金标准：在训练循环的开始，手动更新学习率 ---
         # 1. 计算当前剩余进度
-        self._update_current_progress_remaining(self.num_timesteps, self._total_timesteps)
+        self._update_current_progress_remaining(
+            self.num_timesteps, self._total_timesteps
+        )
         progress_remaining = self._current_progress_remaining
 
         # 2. 从保存在Policy中的、独立的调度函数获取当前的学习率

@@ -271,7 +271,7 @@ def SAC_hybrid_test():
         verbose=1,  # 打印训练日志
         tensorboard_log=log_dir,  # 保存日志用于TensorBoard可视化
         gamma=0.99,  # 折扣因子 # 其实也是默认值
-        batch_size=256,  # 经验回放的批量大小 #默认值
+        batch_size=512,  # 经验回放的批量大小 #默认值
         learning_rate=3e-4,  # 学习率 #默认值
         buffer_size=1_000_000,  # 经验回放的缓冲区大小  #默认值
         tau=0.005,  # 软更新参数 #默认值
@@ -348,7 +348,7 @@ if __name__ == "__main__":
     # test_model()
     # TD3_test()
     # TD3_useThebest()
-    SACtest()
-    # SAC_hybrid_test()
+    # SACtest()
+    SAC_hybrid_test()
     # find_best_hyperparameters()
     # find_best_hyperparameters_sweep()

@@ -21,10 +21,9 @@ from stable_baselines3.common.torch_layers import (
 )
 from stable_baselines3.common.type_aliases import PyTorchObs, Schedule
 
-# from .hybrid_actor import HybridActor
-# from .hybrid_critic import HybridCritic
-from .hybrid_actor_v3 import HybridActor
-from .hybrid_critic_v3 import MultiHeadCritic
+from .hybrid_actor import HybridActor
+from .hybrid_critic import HybridCritic
+
 
 # CAP the standard deviation of the actor
 LOG_STD_MAX = 2
@@ -33,8 +32,8 @@ LOG_STD_MIN = -20
 
 class HybridSACPolicy(BasePolicy):
     actor: HybridActor
-    critic: MultiHeadCritic
-    critic_target: MultiHeadCritic
+    critic: HybridCritic
+    critic_target: HybridCritic
 
     def __init__(
         self,
@@ -129,9 +128,6 @@ class HybridSACPolicy(BasePolicy):
         self.critic_kwargs = self.net_args.copy()
         self.critic_kwargs.update(
             {
-                "continuous_action_dim": get_action_dim(
-                    self.action_space.spaces[1]
-                ),  # 连续动作的维度
                 "net_arch": critic_arch,
                 "n_critics": self.n_critics,
                 "share_features_extractor": self.share_features_extractor,  # Critic 需要知道是否共享
@@ -196,13 +192,13 @@ class HybridSACPolicy(BasePolicy):
 
     def make_critic(
         self, features_extractor: Optional[BaseFeaturesExtractor] = None
-    ) -> MultiHeadCritic:
+    ) -> HybridCritic:
         critic_kwargs = self._update_features_extractor(
             self.critic_kwargs, features_extractor
         )
         # 如果 HybridCritic 的 __init__ 不需要 features_dim，则不需要在这里手动添加
         # critic_kwargs["features_dim"] = critic_kwargs["features_extractor"].features_dim
-        return MultiHeadCritic(**critic_kwargs).to(self.device)
+        return HybridCritic(**critic_kwargs).to(self.device)
 
     def forward(
         self, obs: PyTorchObs, deterministic: bool = False
