@@ -343,6 +343,94 @@ def find_best_hyperparameters_sweep():
     wandb.agent(sweep_id, function=TD3_test, entity="SACtest", count=10)  # 运行30次实验
 
 
+def SAC_hybrid_test_sweep():
+        # 初始化 WandB（注意：这里不需要手动指定 config，Sweep 会自动注入）
+    print("当前模式:", "Sweep" if wandb.config else "普通训练")
+    print("传入的 config:", wandb.config)  # 检查是否收到参数
+
+    run = wandb.init(sync_tensorboard=True)
+    # 从 wandb.config 获取超参数
+    config = wandb.config
+    #使用config的参数或者默认值
+    params={
+        "gamma": config.gamma if config.gamma else 0.99,
+        "batch_size": config.batch_size if config.batch_size else 256,
+        "learning_rate": config.learning_rate if config.learning_rate else 3e-4,
+        "buffer_size": config.buffer_size if config.buffer_size else 1_000_000,
+        "tau": config.tau if config.tau else 0.001,
+        "ent_coef": config.ent_coef if config.ent_coef else 0.1,
+        "device": "cuda",  # 使用GPU
+        
+    }
+    policy_kwargs = {}
+    if wandb.config and hasattr(wandb.config, "net_arch"):
+        policy_kwargs["net_arch"] = wandb.config.net_arch
+    metric_callback = ParallelEpisodeMetricCallback(verbose=1)
+    env1 = make_vec_env(
+        "UAVEnv-v1",
+        n_envs=8,
+        vec_env_cls=SubprocVecEnv,  # 使用SubprocVecEnv来真正利用多核CPU
+        seed=SEED,  # 设置随机种子以确保可重复性
+    )
+    model = HybridSAC(
+        "HybridSACPolicy",
+        env1,
+        verbose=1,
+        tensorboard_log=wandb.run.dir,  # 直接使用 WandB 的日志目录
+        **params,  # 使用从 wandb.config 获取的参数
+        policy_kwargs=policy_kwargs if policy_kwargs else None,
+    )
+    model.learn(
+        total_timesteps=100000,
+        callback=metric_callback,  # 显示进度条
+        log_interval=10,  # 每10步打印一次日志
+    )
+
+def SAC_hybrid_sweep():
+    sweep_configuration = {
+        "name": "SAC_Hybrid_Offloading",
+        "method": "bayes",
+        "metric": {
+            "name": "rollout/ep_rew_mean",  # SB3自动记录的平均回合奖励
+            "goal": "maximize",
+        },
+        "parameters": {
+            # 核心参数 (与SB3实现严格对应)
+            "learning_rate": {
+                "distribution": "log_uniform_values",
+                "min": 1e-5,  # 1e-5
+                "max": 1e-3,  # 1e-3
+            },
+            "buffer_size": {
+                "values": [100000, 300000, 1000000]  # 1e5 to 1e6
+            },
+            "batch_size": {"values": [64, 128, 256, 512]},
+            "tau": {"min": 0.001, "max": 0.01},
+            "gamma": {"min": 0.9, "max": 0.999},
+            # SAC特有参数
+            "ent_coef": {"values": ["auto", 0.1, 0.2, 0.5]},
+            # 网络结构参数
+            "net_arch": {
+                "values": [
+                    [64, 64],  # 简单双隐藏层
+                    [128, 128],
+                    [256, 256],
+                    {"pi": [64], "qf": [128]},  # 异构结构
+                    {"pi": [128, 128], "qf": [256, 256]},
+                ]
+            },
+        },
+        "early_terminate": {"type": "hyperband", "min_iter": 10, "eta": 3},
+    }
+    sweep_id = wandb.sweep(
+        sweep=sweep_configuration,
+        project="UAV-SAC-Hybrid-Optimization",
+        entity="SACtest",  # 你的 W&B 用户名
+    )
+    print(f"Sweep ID: {sweep_id}")  # 确认 Sweep 已创建
+    wandb.agent(sweep_id, function=SAC_hybrid_test, entity="SACtest", count=10)
+
+
 if __name__ == "__main__":
     # vv()
     # test_model()
