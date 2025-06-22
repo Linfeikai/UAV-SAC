@@ -12,7 +12,6 @@ from stable_baselines3.common.distributions import (
 from stable_baselines3.common.type_aliases import PyTorchObs
 from stable_baselines3.sac.policies import LOG_STD_MAX, LOG_STD_MIN
 
-from .hybrid_distribution_v4 import make_hybrid_proba_distribution
 
 
 class HybridActor(BasePolicy):

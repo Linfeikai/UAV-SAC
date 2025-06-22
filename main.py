@@ -244,15 +244,16 @@ def SAC_hybrid_test():
         seed=SEED,  # 设置随机种子以确保可重复性
     )
     # env1.reset(seed=SEED)  # 设置随机种子以确保可重复性
-    log_dir = os.path.join("hybridSAC_v3_model", "logs")
+    log_dir = os.path.join("hybridSAC_v4_model", "logs")
     os.makedirs(log_dir, exist_ok=True)  # 确保日志目录存在
     # 初始化 WandB
     wandb.init(
         project="UAV-SAC_1",  # 项目名称（wandb 仪表盘中显示）
         name="SAC-multiCritic-autodl",  # 实验名称（可选）
         config={  # 记录超参数（可选）
-            "policy": "MlpPolicy",
-            "total_timesteps": 100000,
+            "policy": "embedding-sac",
+            "total_timesteps": 500000,
+            "ent_coef": "auto",  # 自动调整熵系数
         },
         sync_tensorboard=True,  # auto-upload sb3's tensorboard metrics
     )
@@ -275,12 +276,12 @@ def SAC_hybrid_test():
         learning_rate=3e-4,  # 学习率 #默认值
         buffer_size=1_000_000,  # 经验回放的缓冲区大小  #默认值
         tau=0.005,  # 软更新参数 #默认值
-        ent_coef=0.1,  # 自动调整熵系数
+        ent_coef='auto',  # 自动调整熵系数
         device="cuda",
         policy_kwargs=policy_kwargs,  # 使用自定义的学习率调度器
     )
     model.learn(
-        total_timesteps=100000,
+        total_timesteps=500000,
         callback=metric_callback,  # 显示进度条
         log_interval=10,  # 每10步打印一次日志
     )
@@ -289,7 +290,7 @@ def SAC_hybrid_test():
 
     # 确保目标文件夹存在
     timestamp = int(time.time())
-    save_dir = os.path.join("hybridSAC_v3_model", "models")
+    save_dir = os.path.join("hybridSAC_v4_model", "models")
     os.makedirs(save_dir, exist_ok=True)
     model.save(os.path.join(save_dir, f"hybrid_sac_model_{timestamp}"))
 
@@ -341,6 +342,37 @@ def find_best_hyperparameters_sweep():
     )
     print(f"Sweep ID: {sweep_id}")  # 确认 Sweep 已创建
     wandb.agent(sweep_id, function=TD3_test, entity="SACtest", count=10)  # 运行30次实验
+
+def SAC_hybrid_sweep():
+    
+    sweep_configuration = {
+        'name': 'Hybrid_SAC_Sweep',
+        'method': "bayes",
+        "metric": {
+                "name": "rollout/ep_rew_mean",  # SB3自动记录的平均回合奖励
+                "goal": "maximize",
+            },
+        'parameters': {
+            "learning_rate": {"min": 1e-5, "max": 1e-3, "distribution": "log_uniform"},
+            "batch_size": {"values": [256, 512, 1024]},
+            "gamma": {"values": [0.95, 0.99, 0.995]},
+            "ent_coef": {"min": 0.01, "max": 0.2},
+            "tau": {"min": 0.001, "max": 0.1},
+            "net_arch": {
+                    "values": [
+                        [64, 64],  # 简单双隐藏层
+                        [128, 128],
+                        [256, 256],
+                        {"pi": [64], "qf": [128]},  # 异构结构
+                        {"pi": [128, 128], "qf": [256, 256]},
+                    ]
+                },
+        },
+        "early_terminate": {"type": "hyperband", "min_iter": 10, "eta": 3},
+
+    }
+    sweep_id = wandb.sweep(sweep=sweep_configuration, project="UAV-SAC-Optimization",entity="SACtest")  # 创建Sweep
+    wandb.agent(sweep_id, function=SAC_hybrid_test, entity="SACtest", count=30)  # 运行30次实验
 
 
 if __name__ == "__main__":
