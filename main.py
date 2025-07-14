@@ -1,6 +1,7 @@
 from SAC_test.entities.custom_env import CustomEnv
 from custom_components.hybrid_sac_agent import HybridSAC
 import gymnasium as gym
+from gymnasium.wrappers import TimeLimit
 from gymnasium.envs.registration import register
 from stable_baselines3.common.env_checker import check_env
 from stable_baselines3 import SAC, TD3
@@ -10,6 +11,7 @@ from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import SubprocVecEnv
 
 import random
+from SAC_test.rule_based_agent import RuleBasedAgent
 import wandb
 from wandb.integration.sb3 import WandbCallback
 # from swanlab.integration.sb3 import SwanLabCallback
@@ -19,17 +21,16 @@ import pandas as pd  # Optional, but helpful
 import os
 
 import numpy as np
-import torch
 from typing import Dict, List, Optional
 
 from gymnasium.wrappers import TimeLimit
 import warnings
 import swanlab
 
-swanlab.sync_wandb()
-# swanlab.sync_tensorboard_torch()
+# swanlab.sync_wandb()
+# # swanlab.sync_tensorboard_torch()
 
-warnings.filterwarnings("ignore")
+# warnings.filterwarnings("ignore")
 
 
 # 固定随机种子
@@ -191,11 +192,12 @@ def SACtest():
     os.makedirs(log_dir, exist_ok=True)  # 确保日志目录存在
 
     wandb.init(
-        project="UAV-SAC_1",  # 项目名称（wandb 仪表盘中显示）
+        project="SAC-fairness",  # 项目名称（wandb 仪表盘中显示）
         name="experiment-SAC",  # 实验名称（可选）
         config={  # 记录超参数（可选）
-            "policy": "MlpPolicy",
+            # "policy": "MlpPolicy",
             "total_timesteps": 100000,
+            "fairness_penalty_weight": 10.0,  # 公平性惩罚权重
         },
         sync_tensorboard=True,  # auto-upload sb3's tensorboard metrics
     )
@@ -340,15 +342,126 @@ def find_best_hyperparameters_sweep():
         entity="SACtest",  # 你的 W&B 用户名
     )
     print(f"Sweep ID: {sweep_id}")  # 确认 Sweep 已创建
-    wandb.agent(sweep_id, function=TD3_test, entity="SACtest", count=10)  # 运行30次实验
+    wandb.agent(
+        sweep_id, function=SAC_hybrid_test, entity="SACtest", count=10
+    )  # 运行30次实验
+
+
+def test_model():
+    # --- 自动查找并加载最新的模型 ---
+    import os
+    import re
+
+    model_dir = os.path.join("SAC_v0_model", "models")
+    if not os.path.isdir(model_dir):
+        print(f"错误：模型目录 '{model_dir}' 不存在。")
+        return
+
+    # 1. 找到所有符合 'sac_model_*.zip' 格式的文件
+    model_files = [
+        f
+        for f in os.listdir(model_dir)
+        if f.startswith("sac_model_") and f.endswith(".zip")
+    ]
+
+    if not model_files:
+        print(f"错误：在目录 '{model_dir}' 中没有找到任何模型文件。")
+        return
+
+    # 2. 从文件名中解析时间戳，并找到最新的一个
+    latest_timestamp = -1
+    latest_model_file = ""
+    for filename in model_files:
+        # 使用正则表达式从 'sac_model_1751615810.zip' 中提取数字
+        match = re.search(r"sac_model_(\d+)\.zip", filename)
+        if match:
+            timestamp = int(match.group(1))
+            if timestamp > latest_timestamp:
+                latest_timestamp = timestamp
+                latest_model_file = filename
+
+    latest_model_path = os.path.join(model_dir, latest_model_file)
+
+    # 加载模型
+    model = SAC.load(latest_model_path)
+    # 创建环境
+    env = gym.make("UAVEnv-v0", render_mode="human")
+
+    # 确保TimeLimit生效的两种方式：
+    # 方式1：直接包装（推荐）
+    env = TimeLimit(env, max_episode_steps=40)
+
+    # 方式2：检查是否已被TimeLimit包装
+    if not isinstance(env, TimeLimit):
+        env = TimeLimit(env, max_episode_steps=40)
+
+    # 运行测试
+    env = TimeLimit(env, max_episode_steps=40)
+
+    # 运行N个episodes进行测试
+    num_episodes = 5
+
+    for episode in range(num_episodes):
+        # 设置当前episode编号
+        env._current_episode = episode + 1
+
+        obs, _ = env.reset()
+        done = False
+        while not done:
+            action, _ = model.predict(obs, deterministic=True)
+            obs, _, done, truncated, _ = env.step(action)
+
+            # 强制检查步数限制
+            if env._elapsed_steps >= 40:
+                truncated = True
+                break
+
+        print(f"Episode {episode + 1} finished")
+        env.render()  # 这会阻塞直到窗口关闭
+
+    env.close()
+
+
+def test_rule_based_agent():
+    print("--- 正在测试基于规则的智能体 ---")
+    # gym.make 会根据注册信息自动应用 TimeLimit 包装器
+    env = gym.make("UAVEnv-v0", render_mode="human")
+    agent = RuleBasedAgent()
+
+    num_episodes = 5
+    for episode in range(num_episodes):
+        # 为渲染设置当前回合编号
+        env.unwrapped._current_episode = episode + 1
+
+        obs, _ = env.reset()
+        done = False
+        total_reward = 0
+        step_count = 0
+
+        while not done:
+            # 智能体需要访问环境的内部状态来做决策
+            action, _ = agent.predict(obs, env.unwrapped)
+            obs, reward, terminated, truncated, info = env.step(action)
+            total_reward += reward
+            step_count += 1
+            done = terminated or truncated
+
+        print(
+            f"Episode {episode + 1} finished in {step_count} steps. Total reward: {total_reward:.2f}"
+        )
+        # 在回合结束后渲染结果
+        env.render()
+
+    env.close()
 
 
 if __name__ == "__main__":
     # vv()
+    test_rule_based_agent()
     # test_model()
     # TD3_test()
     # TD3_useThebest()
-    SACtest()
+    # SACtest()
     # SAC_hybrid_test()
     # find_best_hyperparameters()
     # find_best_hyperparameters_sweep()
