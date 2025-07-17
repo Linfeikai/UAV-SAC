@@ -2,7 +2,6 @@
 import gymnasium as gym
 from gymnasium import spaces
 from gymnasium.envs.registration import register
-from stable_baselines3 import A2C
 
 # 数学与数据处理
 import numpy as np
@@ -30,7 +29,6 @@ from typing import List, Tuple
 import math
 
 
-# 没有对两个东西进行惩罚：静止不动，还有不公平服务
 class CustomEnv(gym.Env):
     metadata = {
         "render_modes": ["human", "rgb_array"],
