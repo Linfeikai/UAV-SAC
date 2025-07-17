@@ -1,0 +1,40 @@
+# 顶层的减号'-'表示，整个文件是一个“列表”，列表中的每一项都是一个独立的实验配置。
+- 
+  # 因为下面的内容相对于 '-' 缩进了2个空格，所以它们都属于列表的第一个元素。
+  # 这些是“键: 值”对，构成了一个字典。
+  experiment_name: "Rule-Based-Agent"
+  agent_type: "rule_based"
+  num_episodes: 5 # 这是一个整数类型的值
+
+# 这是列表的第二个元素
+- 
+  experiment_name: "Vanilla-SAC"
+  agent_type: "sac"
+  learning_rate: 0.0003 # 数值类型
+  gamma: 0.99
+  total_timesteps: 100000 # 可以写成科学计数法 1e5，但直接写更清晰
+  batch_size: 256 # 经验回放的批量大小
+  tau: 0.005 # 软更新参数
+  buffer_size: 1000000 # 经验回放的缓冲区大小
+
+# 这是列表的第三个元素
+- 
+  experiment_name: "PPO-Baseline"
+  agent_type: "ppo"
+  n_steps: 2048
+  learning_rate: 0.0003
+  total_timesteps: 500000
+
+# 你还可以定义更复杂的层级，比如超参数
+- 
+  experiment_name: "My-SAC-v1"
+  agent_type: "my_sac_v1"
+  total_timesteps: 500000
+  # model_params 是一个“键”，它的“值”是另一个字典
+  model_params:
+    # 下面的内容因为又缩进了2个空格，所以它们属于 model_params
+    learning_rate: 0.001
+    buffer_size: 100000
+    policy_kwargs:
+      # policy_kwargs 的值又是一个字典
+      net_arch: [256, 256] # 这是一个列表

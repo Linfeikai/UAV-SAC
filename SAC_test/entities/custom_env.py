@@ -350,6 +350,7 @@ class CustomEnv(gym.Env):
             "action_invalid_penalty": action_invalid_penalty,
             "flying_reward": flying_reward,
             "terminated": terminated,
+            "consumed_energy": consumed_energy,
         }  # Define an empty dictionary for additional information
         recent_count = list(self.service_history).count(ue_id)
 
