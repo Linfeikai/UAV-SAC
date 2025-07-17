@@ -26,10 +26,10 @@ class RuleBasedAgent:
         Returns:
             一个包含动作和None（用于状态）的元组。
         """
-        # 1. 找到任务队列最大的UE
-        most_demanding_ue = max(env.nodeList, key=lambda ue: ue.current_cache_size)
-
-        ue_id = env.nodeList.index(most_demanding_ue)
+        # 1. 找到任务队列最大的UE (使用NumPy进行优化，效率更高)
+        # env.ue_cache_sizes 是一个NumPy数组，存储了所有UE的当前缓存大小
+        ue_id = np.argmax(env.ue_cache_sizes)
+        most_demanding_ue = env.nodeList[ue_id]
 
         # 2. 计算朝向该UE的方向角度
         uav_loc = env.uav.loc

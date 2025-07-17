@@ -129,6 +129,19 @@ class CustomEnv(gym.Env):
             self.reward_components_history = []
             self.battery_at_decision = []
             self.offloading_ratio_at_decision = []
+            self.uav_flying_speed_progress = []
+
+        else:
+            self.uav_flying_speed_progress = None
+            self.flying_trajectory = None
+            self.uav_battery_progress = None
+            self.served_ue_history = None
+            self.flying_energy_progress = None
+            self.com_energy_progress = None
+            self.charging_energy_progress = None
+            self.reward_components_history = None
+            self.battery_at_decision = None
+            self.offloading_ratio_at_decision = None
 
         self.uav = UAVNode()
         self.charger = LaserCharger()
@@ -211,7 +224,7 @@ class CustomEnv(gym.Env):
         for task in served_ue.task_queue:
             if task.status == 0:  # If a task is unprocessed
                 is_task_failed = True
-                logging.warning(f"Unprocessed task found: {task}")
+                # logging.warning(f"Unprocessed task found: {task}")
                 # 任务未处理，给予惩罚
                 if self.render_mode == "human":
                     self.failed_tasks += 1
@@ -501,10 +514,9 @@ class CustomEnv(gym.Env):
             self.offloading_ratio_at_decision.append(offloading_ratio)
             for node in self.nodeList:
                 self.total_tasks += len(node.task_queue)
-
-        # 2. 更新服务历史和计数
-        if self.served_ue_history is not None:
+            # 更新服务历史和计数
             self.served_ue_history.append(ue_id)
+
         self.service_counts[ue_id] += 1
 
         # 3. 检查选择的UE是否有任务，并给予惩罚 目前不会有这个情况
@@ -597,6 +609,9 @@ class CustomEnv(gym.Env):
             self.flying_energy_progress.append(flight_info.get("flying_energy", 0))
             self.com_energy_progress.append(delay_info.get("consumed_energy", 0))
             self.charging_energy_progress.append(delay_info.get("harvested_energy", 0))
+            # 记录无人机的飞行速度
+            self.uav_flying_speed_progress.append(self.uav.flying_speed)
+
             self.reward_components_history.append(reward_components)
             self.total_episode_delay += delay_info.get("delay", 0.0)
 
@@ -744,12 +759,13 @@ class CustomEnv(gym.Env):
 
         # --- 创建 3x3 网格布局以容纳更多图表 ---
         gs = fig.add_gridspec(3, 3)
-        ax_trajectory = fig.add_subplot(gs[0:2, 0:2])  # 轨迹图，占用2x2
-        ax_battery = fig.add_subplot(gs[2, 0])  # 电池图
-        ax_reward_comp = fig.add_subplot(gs[2, 1])  # 奖励分解图
-        ax_service_hist = fig.add_subplot(gs[0, 2])  # 服务直方图
+        ax_trajectory = fig.add_subplot(gs[0, 0])  # 轨迹图，占用2x2
+        ax_battery = fig.add_subplot(gs[0, 1])  # 电池图
+        ax_uav_speed = fig.add_subplot(gs[0, 2])  # 添加无人机速度图
+        ax_reward_comp = fig.add_subplot(gs[1, 0])  # 奖励分解图
+        ax_service_hist = fig.add_subplot(gs[1, 1])  # 服务直方图
         ax_energy_pie = fig.add_subplot(gs[1, 2])  # 能耗饼图
-        ax_decision = fig.add_subplot(gs[2, 2])  # 新增：决策图
+        ax_decision = fig.add_subplot(gs[2, 0])  # 新增：决策图
 
         # --- 1. 轨迹图 ---
         ax_trajectory.set_title("UAV Trajectory & Node Distribution")
@@ -948,6 +964,31 @@ class CustomEnv(gym.Env):
             ax_reward_comp.legend(fontsize="small", ncol=2)
             ax_reward_comp.grid(True, linestyle="--")
 
+        # --- 6. 无人机速度图 ---
+        ax_uav_speed.set_title("UAV Flying Speed Over Time")
+        if self.uav_flying_speed_progress:
+            steps = range(len(self.uav_flying_speed_progress))
+            ax_uav_speed.plot(
+                steps,
+                self.uav_flying_speed_progress,
+                color="darkgreen",
+                label="Flying Speed (m/s)",
+            )
+            ax_uav_speed.set_xlabel("Time Step")
+            ax_uav_speed.set_ylabel("Speed (m/s)")
+            ax_uav_speed.set_ylim(0, self.uav.max_speed * 1.05)
+            ax_uav_speed.grid(True, linestyle="--")
+            ax_uav_speed.legend()
+        else:
+            ax_uav_speed.text(
+                0.5,
+                0.5,
+                "No Speed Data",
+                ha="center",
+                va="center",
+                transform=ax_uav_speed.transAxes,
+            )
+
         # --- 6. 新增：决策图 (卸载率 vs. 电池) ---
         ax_decision.set_title("Decision: Offloading vs. Battery")
         if self.battery_at_decision and self.offloading_ratio_at_decision:
@@ -1063,13 +1104,13 @@ class CustomEnv(gym.Env):
             logging.warning("UAV battery depleted. Episode terminated.")
             return True
 
-        # --- 优化点: 使用 any() 替代显式循环，更高效、更Pythonic ---
-        # 检查是否还有任何一个节点任务队列不为空
-        if any(node.task_queue for node in self.nodeList):
-            return False  # 只要有一个不为空，就继续
+        # # --- 优化点: 使用 any() 替代显式循环，更高效、更Pythonic ---
+        # # 检查是否还有任何一个节点任务队列不为空
+        # if any(node.task_queue for node in self.nodeList):
+        #     return False  # 只要有一个不为空，就继续
 
-        logging.info("All tasks completed. Episode finished successfully.")
-        return True  # 所有队列都为空，回合结束
+        # logging.info("All tasks completed. Episode finished successfully.")
+        return False  # 所有队列都为空，回合结束
 
     def calculate_fairness(self):
         """计算当前时刻的Jain公平性指数"""

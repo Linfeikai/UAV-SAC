@@ -71,7 +71,7 @@ class UAVNode:
 
             # 检查加上这个任务后是否会超时
             if cumulative_processing_time + processing_time > hover_time:
-                print(f"UAV计算超时，在处理任务 {task} 时停止。")
+                # print(f"UAV计算超时，在处理任务 {task} 时停止。")
                 break  # 停止处理后续任务
 
             task.status = 2  # 标记为uav完成

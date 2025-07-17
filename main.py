@@ -4,11 +4,18 @@ import gymnasium as gym
 from gymnasium.wrappers import TimeLimit
 from gymnasium.envs.registration import register
 from stable_baselines3.common.env_checker import check_env
-from stable_baselines3 import SAC, TD3
-from stable_baselines3.common.callbacks import BaseCallback, CallbackList
+from stable_baselines3 import SAC, TD3, PPO
+from stable_baselines3.common.callbacks import (
+    BaseCallback,
+    CallbackList,
+    CheckpointCallback,
+)
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import SubprocVecEnv
+
+import yaml
+import argparse
 
 import random
 from SAC_test.rule_based_agent import RuleBasedAgent
@@ -181,24 +188,65 @@ class ParallelEpisodeMetricCallback(BaseCallback):
         return True
 
 
-def SACtest():
+def run_experiment(config: dict):
+    """
+    根据给定的配置字典，运行单个实验。
+
+    Args:
+        config (dict): 包含单个实验所有参数的字典。
+    """
+    print(f"--- Running Experiment: {config['experiment_name']} ---")
+
+    agent_type = config.get("agent_type")  # 这里的config就是yaml文件里的一个元素
+
+    if agent_type == "rule_based":
+        num_episodes = config.get("num_episodes", 5)
+        print("Running Rule-Based Agent...")
+        # 这里你需要调用一个函数来运行你的规则智能体并评估它
+        run_rule_based_agent(num_episodes)  # 这是一个示例调用
+        print("Rule-Based Agent finished.")
+        return  # 基准测试运行完后直接返回
+
+    elif agent_type == "sac":
+        run_vanilla_sac(config)  # 直接运行SAC的测试函数
+    elif agent_type == "ppo":
+        run_ppo(config)
+    # 在这里可以添加你自己改进的SAC算法的逻辑
+    # elif agent_type == "my_sac_v1":
+    #     model = MySACv1(...) # 使用你的自定义参数
+
+    else:
+        raise ValueError(f"Unknown agent_type: {agent_type}")
+
+
+def run_vanilla_sac(config: dict):
+    # 从配置中获取环境和超参数
+    experiment_name = config.get("experiment_name", "Vanilla-SAC")
+    learning_rate = config.get("learning_rate", 3e-4)
+    total_timesteps = config.get("total_timesteps", 100000)
+    gamma = config.get("gamma", 0.99)
+    batch_size = config.get("batch_size", 256)
+    tau = config.get("tau", 0.005)
+    buffer_size = config.get("buffer_size", 1_000_000)
     env1 = make_vec_env(
         "UAVEnv-v0",
         n_envs=8,
         vec_env_cls=SubprocVecEnv,  # 使用SubprocVecEnv来真正利用多核CPU
         seed=SEED,  # 设置随机种子以确保可重复性
     )
-    log_dir = os.path.join("SAC_v0_model", "logs")
-    os.makedirs(log_dir, exist_ok=True)  # 确保日志目录存在
+    log_path = os.path.join("logs", experiment_name)
+    save_path = os.path.join("models", experiment_name)
+    os.makedirs(log_path, exist_ok=True)  # 确保日志目录存在
+    os.makedirs(save_path, exist_ok=True)  # 确保模型保存目录存在
 
     wandb.init(
-        project="SAC-fairness",  # 项目名称（wandb 仪表盘中显示）
-        name="experiment-SAC",  # 实验名称（可选）
-        config={  # 记录超参数（可选）
-            # "policy": "MlpPolicy",
-            "total_timesteps": 100000,
-            "fairness_penalty_weight": 10.0,  # 公平性惩罚权重
-        },
+        project="SAC-new-env",  # 项目名称（wandb 仪表盘中显示）
+        name=experiment_name,  # 实验名称（可选）
+        # config={  # 记录超参数（可选）
+        #     # "policy": "MlpPolicy",
+        #     "total_timesteps": 100000,
+        #     # "fairness_penalty_weight": 10.0,  # 公平性惩罚权重
+        # },
         sync_tensorboard=True,  # auto-upload sb3's tensorboard metrics
     )
 
@@ -211,17 +259,17 @@ def SACtest():
         "MlpPolicy",  # 使用多层感知机策略
         env1,
         verbose=1,  # 打印训练日志
-        tensorboard_log=log_dir,  # 保存日志用于TensorBoard可视化
-        gamma=0.99,  # 折扣因子
-        batch_size=256,  # 经验回放的批量大小
-        learning_rate=3e-4,  # 学习率
-        buffer_size=1_000_000,  # 经验回放的缓冲区大小
-        tau=0.005,  # 软更新参数
+        tensorboard_log=log_path,  # 保存日志用于TensorBoard可视化
+        gamma=gamma,  # 折扣因子
+        batch_size=batch_size,  # 经验回放的批量大小
+        learning_rate=learning_rate,  # 学习率
+        buffer_size=buffer_size,  # 经验回放的缓冲区大小
+        tau=tau,  # 软更新参数
     )
 
     # 训练模型（带进度条）
     model.learn(
-        total_timesteps=100000,
+        total_timesteps=total_timesteps,
         callback=metric_callback,  # 显示进度条
         log_interval=10,  # 每10步打印一次日志
     )
@@ -233,9 +281,12 @@ def SACtest():
 
     # 确保目标文件夹存在
     timestamp = int(time.time())
-    save_dir = os.path.join("SAC_v0_model", "models")
-    os.makedirs(save_dir, exist_ok=True)
-    model.save(os.path.join(save_dir, f"sac_model_{timestamp}"))
+    model_name = f"{experiment_name}_{timestamp}"
+    model.save(os.path.join(save_path, model_name))
+
+
+def run_ppo(config: dict):
+    print()
 
 
 def SAC_hybrid_test():
@@ -422,7 +473,7 @@ def test_model():
     env.close()
 
 
-def test_rule_based_agent():
+def run_rule_based_agent(num_episodes: int = 5):
     print("--- 正在测试基于规则的智能体 ---")
     # gym.make 会根据注册信息自动应用 TimeLimit 包装器
     env = gym.make("UAVEnv-v0", render_mode="human")
@@ -456,12 +507,59 @@ def test_rule_based_agent():
 
 
 if __name__ == "__main__":
-    # vv()
-    test_rule_based_agent()
+    # test_rule_based_agent()
     # test_model()
     # TD3_test()
     # TD3_useThebest()
     # SACtest()
+    # test_model()
     # SAC_hybrid_test()
     # find_best_hyperparameters()
     # find_best_hyperparameters_sweep()
+    # --- 这是脚本的主入口 ---
+
+    # 1. 创建一个命令行参数解析器
+    parser = argparse.ArgumentParser(
+        description="Run RL experiments based on a YAML config file."
+    )
+
+    # 2. 添加我们需要的命令行参数
+    parser.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help="Path to the experiment configuration YAML file (e.g., experiments.yaml)",
+    )
+    parser.add_argument(
+        "--name",
+        type=str,
+        required=True,
+        help="The 'experiment_name' from the config file to run.",
+    )
+
+    # 3. 解析传入的参数
+    args = parser.parse_args()
+
+    # 4. 加载YAML配置文件
+    try:
+        with open(args.config, "r") as f:
+            all_experiments = yaml.safe_load(f)
+    except FileNotFoundError:
+        print(f"Error: Config file not found at {args.config}")
+        exit(1)
+
+    # 5. 查找与传入的 --name 匹配的实验配置
+    experiment_config = None
+    for exp in all_experiments:
+        if (
+            exp["experiment_name"] == args.name
+        ):  # 匹配命令行输入的--name 也就是args.name是否和yaml文件里哪个exp的experiment_name一致
+            experiment_config = exp
+            break
+
+    # 6. 如果找到了配置，就运行实验
+    if experiment_config:
+        run_experiment(experiment_config)
+    else:
+        print(f"Error: Experiment with name '{args.name}' not found in {args.config}")
+        exit(1)

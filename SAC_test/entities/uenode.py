@@ -125,10 +125,10 @@ class UENode:
             )
 
             if cumulative_processing_time + processing_time > available_time:
-                logging.warning(
-                    f"UE local computation timeout. Node  [{self.loc[0]:.2f}, {self.loc[1]:.2f}] with {self.nodetype} processed {processed_tasks_count} tasks. "
-                    f"{len(self.task_queue) - processed_tasks_count} tasks remaining."
-                )
+                # logging.warning(
+                #     f"UE local computation timeout. Node  [{self.loc[0]:.2f}, {self.loc[1]:.2f}] with {self.nodetype} processed {processed_tasks_count} tasks. "
+                #     f"{len(self.task_queue) - processed_tasks_count} tasks remaining."
+                # )
                 break  # 超时，停止处理
 
             task.status = 1
@@ -164,9 +164,9 @@ class UENode:
             )
 
             if cumulative_processing_time + processing_time > available_time:
-                logging.warning(
-                    f"UE partial local computation timeout. Stopping processing."
-                )
+                # logging.warning(
+                #     f"UE partial local computation timeout. Stopping processing."
+                # )
                 break  # 超时，停止处理后续任务
 
             task.status = 1  # 本地完成
