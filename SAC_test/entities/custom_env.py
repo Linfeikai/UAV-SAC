@@ -321,6 +321,7 @@ class CustomEnv(gym.Env):
     ) -> dict:
         """计算整个系统的延迟，并检查任务是否失败。"""
         total_system_delay = 0.0
+        #
 
         # 处理被服务的UE
         (
@@ -335,7 +336,9 @@ class CustomEnv(gym.Env):
         # --- 核心逻辑修正 ---
         # 任务成功，但我们还不能立刻更新全局时间。
         # 我们需要先计算出所有节点的完成时间，然后取最晚的那个。
-        local_failure_penalty = 0.0
+        # local_failure_penalty = 0.0
+        num_local_failures = 0  # <-- 使用这个计数器
+
         latest_completion_time = served_ue_completion_time
 
         # 在任务成功后，用剩余的悬停时间进行充电 ---
@@ -363,7 +366,7 @@ class CustomEnv(gym.Env):
                     # )
                     # 训练智能体具备宏观风险意识的关键机制。
                     # 当这个叠加惩罚出现时，它会给智能体的学习过程带来一次强烈的“震撼教育”。
-                    local_failure_penalty += self.Config.PENALTY_TASK_FAILURE
+                    num_local_failures += 1  # 只做计数
                     # 将剩余任务标记为丢弃并清空队列，以避免累积积压
                     for task in node.task_queue:
                         task.status = 3  # Discarded
@@ -381,7 +384,7 @@ class CustomEnv(gym.Env):
             "delay": total_system_delay,
             "consumed_energy": consumed_energy,
             "harvested_energy": harvested_energy,  # 将充电量返回
-            "local_failure_penalty": local_failure_penalty,
+            "num_local_failures": num_local_failures,
             "served_ue_task_penalty": served_ue_task_penalty,
         }
 
@@ -456,9 +459,18 @@ class CustomEnv(gym.Env):
         # 任务失败的惩罚现在从delay_info里获取
 
         served_ue_penalty = delay_info.get("served_ue_task_penalty", 0.0)
-        local_failure_penalty = delay_info.get("local_failure_penalty", 0.0)
+        # local_failure_penalty = delay_info.get("local_failure_penalty", 0.0)
         out_of_border_penalty = flight_info.get("out_of_border_penalty", 0.0)
         static_penalty = flight_info.get("static_penalty", 0.0)
+
+        # (B) 处理本地节点失败惩罚
+        num_failures = delay_info.get("num_local_failures", 0)
+        local_failure_penalty = 0.0  # 默认为0
+        if num_failures > 0:
+            # 计算失败率，将其归一化到 [0, 1]
+            failure_ratio = num_failures / (self.ue_num - 1)
+            # 用失败率来缩放基础惩罚值
+            local_failure_penalty = failure_ratio * self.Config.PENALTY_TASK_FAILURE
 
         reward = reward + (
             served_ue_penalty
