@@ -10,8 +10,8 @@ from typing import Dict, Any, List, Type, Optional, Union
 import numpy as np
 
 # 导入我们新定义的Actor和Critic
-from hybrid_actor import DiffusionPolicyActor
-from hybrid_critic import ContinuousCritic
+from .diffusion_policy_actor import DiffusionPolicyActor
+from .diffusion_policy_critic import ContinuousCritic
 
 # 从SB3导入必要的基类和类型提示
 from stable_baselines3.common.policies import BasePolicy

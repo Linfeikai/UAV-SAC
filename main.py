@@ -1,5 +1,7 @@
 from SAC_test.entities.custom_env import CustomEnv
-from custom_components.hybrid_sac_agent import HybridSAC
+
+# from custom_components.hybrid_sac_agent import HybridSAC
+from diffusion_sac.diffusion_sac_agent import DiffusionSACAgent
 import gymnasium as gym
 from gymnasium.wrappers import TimeLimit
 from gymnasium.envs.registration import register
@@ -26,9 +28,10 @@ from wandb.integration.sb3 import WandbCallback
 
 import pandas as pd  # Optional, but helpful
 import os
+import torch as th
 
 import numpy as np
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from gymnasium.wrappers import TimeLimit
 import warnings
@@ -44,18 +47,16 @@ import swanlab
 SEED = 42
 
 
-print("Setting random seed for reproducibility...")
-register(
-    id="UAVEnv-v1",
-    entry_point="SAC_test.entities.custom_env:CustomEnv",
-    max_episode_steps=40,
-)
 register(
     id="UAVEnv-v0",
     entry_point="SAC_test.entities.custom_env_sac:CustomEnv",
     max_episode_steps=40,
 )
-
+register(
+    id="UAVEnv-v1",
+    entry_point="SAC_test.entities.custom_env:CustomEnv",
+    max_episode_steps=40,
+)
 # 1. 定义两个不同的初始学习率
 # Actor可以快一点，因为它需要探索。Critic必须稳，所以让它慢得多。
 lr_actor_initial = 3e-4  # 保持原来的值
@@ -188,6 +189,78 @@ class ParallelEpisodeMetricCallback(BaseCallback):
         return True
 
 
+class UAVEnvWrapper(gym.Wrapper):
+    """
+    将需要混合动作(Tuple)的无人机环境，
+    伪装成一个接受连续动作(Box)的环境。
+    """
+
+    def __init__(self, env: gym.Env, ue_embedding_dim: int = 8):
+        super().__init__(env)
+
+        # 从原始环境中获取离散和连续动作空间的信息
+        self.num_ues = self.env.action_space.spaces[0].n
+        self.continuous_dim = self.env.action_space.spaces[1].shape[0]
+        self.ue_embedding_dim = ue_embedding_dim
+
+        # ======================= 关键修正 =======================
+        # 创建一个独立的、有固定种子的随机数生成器
+        # 种子 '42' 是一个任意选择的数字，只要它固定不变即可
+        embedding_rng = np.random.RandomState(42)
+
+        # 使用这个固定的生成器来创建嵌入向量
+        ue_embeddings = embedding_rng.randn(self.num_ues, self.ue_embedding_dim).astype(
+            np.float32
+        )
+        # =======================================================
+
+        self.ue_embeddings_th = th.from_numpy(ue_embeddings).to(
+            "cuda" if th.cuda.is_available() else "cpu"
+        )
+
+        # 定义新的、统一的、对Agent可见的动作空间 (Box)
+        new_action_dim = self.ue_embedding_dim + self.continuous_dim
+        # 重要：Agent输出的动作范围通常是[-1, 1]，我们需要在这里定义好
+        self.action_space = gym.spaces.Box(
+            low=-1.0, high=1.0, shape=(new_action_dim,), dtype=np.float32
+        )
+        print("UAVEnvWrapper 已创建，动作空间已转换。")
+
+    def _decode_action(self, action: np.ndarray) -> Tuple[int, np.ndarray]:
+        """
+        解码Agent输出的连续动作向量。
+        """
+        action = np.clip(action, -1.0, 1.0)
+
+        action_th = th.from_numpy(action).to(self.ue_embeddings_th.device)
+
+        # 解码离散部分 (选择UE)
+        ue_vector_from_action = action_th[: self.ue_embedding_dim]
+        # self.ue_embeddings_th 的 shape: [num_ues, ue_embedding_dim]
+        distances = th.cdist(ue_vector_from_action.unsqueeze(0), self.ue_embeddings_th)
+        # distances 的 shape: [1, num_ues], 找到最小距离的索引
+        discrete_action = th.argmin(distances, dim=1).item()
+
+        # 解码连续部分 (飞行参数)
+        # 注意：Agent输出的连续动作在[-1, 1]范围，需要映射回原始范围
+        original_continuous_space = self.env.action_space.spaces[1]
+        low = original_continuous_space.low
+        high = original_continuous_space.high
+
+        # 从[-1, 1]映射回[low, high]
+        continuous_action_normalized = action[self.ue_embedding_dim :]
+        continuous_action_rescaled = low + (
+            0.5 * (continuous_action_normalized + 1.0) * (high - low)
+        )
+
+        return (discrete_action, continuous_action_rescaled)
+
+    def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, dict]:
+        # 将Agent的连续动作解码为环境需要的混合动作
+        hybrid_action = self._decode_action(action)
+        return self.env.step(hybrid_action)
+
+
 def run_experiment(config: dict):
     """
     根据给定的配置字典，运行单个实验。
@@ -211,6 +284,8 @@ def run_experiment(config: dict):
         run_vanilla_sac(config)  # 直接运行SAC的测试函数
     elif agent_type == "ppo":
         run_ppo(config)
+    elif agent_type == "diffusion_sac":
+        run_diffusion_sac(config)
     # 在这里可以添加你自己改进的SAC算法的逻辑
     # elif agent_type == "my_sac_v1":
     #     model = MySACv1(...) # 使用你的自定义参数
@@ -228,6 +303,8 @@ def run_vanilla_sac(config: dict):
     batch_size = config.get("batch_size", 256)
     tau = config.get("tau", 0.005)
     buffer_size = config.get("buffer_size", 1_000_000)
+
+    # 使用的是纯连续的环境v0
     env1 = make_vec_env(
         "UAVEnv-v0",
         n_envs=8,
@@ -345,6 +422,79 @@ def SAC_hybrid_test():
     save_dir = os.path.join("hybridSAC_v3_model", "models")
     os.makedirs(save_dir, exist_ok=True)
     model.save(os.path.join(save_dir, f"hybrid_sac_model_{timestamp}"))
+
+
+def run_diffusion_sac(config: dict):
+    # 要创建的并行环境数量
+    num_envs = 4
+
+    # Wrapper 和 Policy 的参数
+    # 注意：wrapper_kwargs 是用来传递给 Wrapper 的构造函数的
+    experiment_name = config.get("experiment_name", "Diffusion-SAC-UAV")
+    wrapper_kwargs = config.get("wrapper_kwargs", {})
+    policy_kwargs = config.get("policy_kwargs", {})
+    qne_k_samples = config.get("qne_k_samples", 32)
+    total_timesteps = config.get("total_timesteps", 1_000_000)
+    learning_rate = config.get("learning_rate", 3e-4)
+    # 保存log和model的路径
+    log_path = os.path.join("logs", experiment_name)
+    save_path = os.path.join("models", experiment_name)
+    os.makedirs(log_path, exist_ok=True)  # 确保日志目录存在
+    os.makedirs(save_path, exist_ok=True)  # 确保模型保存目录存在
+
+    # 1. 创建您的原始无人机环境
+    env = make_vec_env(
+        "UAVEnv-v1",
+        n_envs=num_envs,  # 创建多个并行环境
+        wrapper_class=UAVEnvWrapper,  # 使用自定义的包装器
+        wrapper_kwargs=wrapper_kwargs,  # 传递包装器参数
+        vec_env_cls=SubprocVecEnv,  # 使用SubprocVecEnv来真正利用多核CPU
+        seed=SEED,  # 设置随机种子以确保可重复性
+    )
+    # 2.初始化wandb
+    wandb.init(
+        project="SAC-new-env",  # 项目名称（wandb 仪表盘中显示）
+        name=experiment_name,  # 实验名称（可选）
+        config={  # 记录超参数（可选）
+            # "policy": "MlpPolicy",
+            "total_timesteps": total_timesteps,
+            "qne_k_samples": qne_k_samples,
+            "T_steps": policy_kwargs["T"],
+            "ue_embedding_dim": wrapper_kwargs["ue_embedding_dim"],
+            # "fairness_penalty_weight": 10.0,  # 公平性惩罚权重
+        },
+        sync_tensorboard=True,  # auto-upload sb3's tensorboard metrics
+    )
+    metric_callback = ParallelEpisodeMetricCallback(verbose=1)
+
+    #
+    # 3. 像之前一样创建并训练您的Agent
+    #    Agent本身不需要做任何改动，因为它看到的是一个简单的Box动作空间
+    model = DiffusionSACAgent(
+        policy="DiffusionSACPolicy",  # 使用自定义的DiffusionSAC策略
+        env=env,  # <-- 传入被包裹后的环境
+        tensorboard_log=log_path,  # 保存日志用于TensorBoard可视化
+        verbose=1,
+        learning_starts=10000,  # 经验回放开始训练的步数
+        qne_k_samples=qne_k_samples,  # QNE中的K值
+        policy_kwargs=policy_kwargs,  # 传入扩散模型和QNE所需的特定超参数
+        learning_rate=learning_rate,  # 学习率
+        # ... 其他所有超参数 ...
+    )
+
+    print("--- 开始在您的自定义无人机环境上训练 DiffusionSACAgent ---")
+    model.learn(
+        total_timesteps=total_timesteps,
+        log_interval=10,
+        callback=metric_callback,
+    )
+
+    import time
+
+    # 确保目标文件夹存在
+    timestamp = int(time.time())
+    model_name = f"{experiment_name}_{timestamp}"
+    model.save(os.path.join(save_path, model_name))
 
 
 def find_best_hyperparameters_sweep():
@@ -542,7 +692,7 @@ if __name__ == "__main__":
 
     # 4. 加载YAML配置文件
     try:
-        with open(args.config, "r") as f:
+        with open(args.config, "r", encoding="utf-8") as f:
             all_experiments = yaml.safe_load(f)
     except FileNotFoundError:
         print(f"Error: Config file not found at {args.config}")

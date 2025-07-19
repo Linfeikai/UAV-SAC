@@ -11,11 +11,11 @@ from gymnasium import spaces
 from typing import Any, ClassVar, Optional, Type, TypeVar, Union, Dict, List, Tuple
 
 # 导入我们新定义的 Policy
-from diffusion_sac_policy import DiffusionSACPolicy
+from .diffusion_sac_policy import DiffusionSACPolicy
 
 # 导入我们新定义的 Actor 和 Critic
-from diffusion_policy_actor import DiffusionPolicyActor
-from diffusion_policy_critic import ContinuousCritic
+from .diffusion_policy_actor import DiffusionPolicyActor
+from .diffusion_policy_critic import ContinuousCritic
 
 # 导入标准的 ReplayBuffer 和 SB3 的核心组件
 from stable_baselines3.common.buffers import ReplayBuffer
@@ -48,7 +48,7 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
         self,
         policy: Union[str, Type[DiffusionSACPolicy]],
         env: Union[GymEnv, str],
-        learning_rate: Union[float, Schedule] = 1e-4,
+        learning_rate: Union[float, Schedule] = 3e-5,
         buffer_size: int = 1_000_000,
         learning_starts: int = 100,
         batch_size: int = 256,
@@ -65,7 +65,7 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
         target_update_interval: int = 1,
         target_entropy: Union[str, float] = "auto",
         # --- 新增的扩散模型特定参数 ---
-        qne_k_samples: int = 50,  # QNE中的K值，即"头脑风暴"的样本数
+        qne_k_samples: int = 32,  # QNE中的K值，即"头脑风暴"的样本数
         policy_kwargs: Optional[Dict[str, Any]] = None,
         # --- 其他标准参数 ---
         tensorboard_log: Optional[str] = None,
@@ -283,8 +283,12 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
             )  # [B*K, 1] -> [B, K, 1]
 
             #    iii. Softmax加权合成Target_Noise
+            # softmax_weights = F.softmax(
+            #     q_values_k / ent_coef_tensor.detach(), dim=1
+            # )  # [B, K, 1]
+            q_values_stable = q_values_k - th.max(q_values_k, dim=1, keepdim=True)[0]
             softmax_weights = F.softmax(
-                q_values_k / ent_coef_tensor.detach(), dim=1
+                q_values_stable / ent_coef_tensor.detach(), dim=1
             )  # [B, K, 1]
 
             # Target_Noise 是对那K个随机噪声的加权和

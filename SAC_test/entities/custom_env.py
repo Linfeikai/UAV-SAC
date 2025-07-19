@@ -91,7 +91,7 @@ class CustomEnv(gym.Env):
         self, render_mode=None
     ):  # 离散值：选择ue；连续值：距离，方向，卸载比率
         super(CustomEnv, self).__init__()
-        # --- 3. 结构清晰化：清理并明确定义动作空间和观察空间 ---
+
         # 1. 离散部分：选择要服务的UE，范围是 [0, ue_num-1]
         self.discrete_action_space = spaces.Discrete(self.ue_num)
 
@@ -1098,7 +1098,7 @@ class CustomEnv(gym.Env):
         """检查回合是否应终止。"""
         # 失败条件：无人机电量耗尽
         if self.uav.e_battery <= 0:
-            logging.warning("UAV battery depleted. Episode terminated.")
+            # logging.warning("UAV battery depleted. Episode terminated.")
             return True
 
         # # --- 优化点: 使用 any() 替代显式循环，更高效、更Pythonic ---
