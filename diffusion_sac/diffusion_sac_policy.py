@@ -53,7 +53,16 @@ class DiffusionSACPolicy(BasePolicy):
         # --- Diffusion Actor 特有的参数 ---
         T: int = 5,
         beta_schedule: str = "linear",
+        **kwargs: Any,
     ):
+        print(
+            "DiffusionSACPolicy kwargs:", kwargs
+        )  # 检查是否包含 lr_actor_schedule 和 lr_critic_schedule
+
+        lr_actor_schedule = kwargs.pop("lr_actor_schedule", lr_schedule)
+        lr_critic_schedule = kwargs.pop("lr_critic_schedule", lr_schedule)
+        self.lr_actor_schedule = lr_actor_schedule
+        self.lr_critic_schedule = lr_critic_schedule
         # 调用父类构造函数，但只传递它能安全处理的核心参数
         super().__init__(
             observation_space,
@@ -106,9 +115,9 @@ class DiffusionSACPolicy(BasePolicy):
             }
         )
 
-        self._build(lr_schedule)
+        self._build(lr_actor_schedule, lr_critic_schedule)
 
-    def _build(self, lr_schedule: Schedule) -> None:
+    def _build(self, lr_actor_schedule: Schedule, lr_critic_schedule: Schedule) -> None:
         """
         创建actor, critic, 和它们的优化器.
         """
@@ -130,10 +139,10 @@ class DiffusionSACPolicy(BasePolicy):
 
         # Setup optimizers
         self.actor.optimizer = self.optimizer_class(
-            self.actor.parameters(), lr=lr_schedule(1), **self.optimizer_kwargs
+            self.actor.parameters(), lr=lr_actor_schedule(1), **self.optimizer_kwargs
         )
         self.critic.optimizer = self.optimizer_class(
-            self.critic.parameters(), lr=lr_schedule(1), **self.optimizer_kwargs
+            self.critic.parameters(), lr=lr_critic_schedule(1), **self.optimizer_kwargs
         )
 
         self.to(self.device)
