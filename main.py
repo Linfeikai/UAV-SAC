@@ -59,8 +59,8 @@ register(
 )
 # 1. 定义两个不同的初始学习率
 # Actor可以快一点，因为它需要探索。Critic必须稳，所以让它慢得多。
-lr_actor_initial = 3e-4  # 保持原来的值
-lr_critic_initial = 3e-5  # 降低一个数量级
+lr_actor_initial = 3e-5  # 保持原来的值
+lr_critic_initial = 3e-4  # 降低一个数量级
 
 
 # 2. 为它们分别创建衰减函数
@@ -261,6 +261,52 @@ class UAVEnvWrapper(gym.Wrapper):
         return self.env.step(hybrid_action)
 
 
+class SACWrapper(gym.Wrapper):
+    """
+    一个专门为标准 SAC 设计的包装器。
+    它将 custom_env.py 的混合动作空间 (Tuple)
+    转换为一个扁平的连续动作空间 (Box)。
+    """
+
+    def __init__(self, env: gym.Env):
+        super().__init__(env)
+
+        # 从原始环境中获取离散和连续动作空间
+        discrete_space = self.env.action_space.spaces[0]
+        continuous_space = self.env.action_space.spaces[1]
+
+        # 定义新的、对 SAC Agent 可见的扁平化 Box 动作空间
+        # 我们将离散动作的范围 [0, N-1] 也视为一个连续维度
+        self.action_space = gym.spaces.Box(
+            low=np.concatenate(([discrete_space.start], continuous_space.low)),
+            high=np.concatenate(([discrete_space.n - 1], continuous_space.high)),
+            dtype=np.float32,
+        )
+        print("SACWrapper applied: Action space converted from Tuple to Box.")
+
+    def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, dict]:
+        """
+        在将动作传递给底层环境之前，对其进行解码。
+        """
+        # 1. 解码动作：将连续值转换为 (离散, 连续) 的元组
+        #    这部分逻辑完全来自于你之前的 custom_env_sac.py
+
+        # 离散部分：取整并裁剪
+        ue_id = int(np.round(action[0]))
+        ue_id = np.clip(ue_id, 0, self.env.action_space.spaces[0].n - 1)
+
+        # 连续部分：直接使用
+        continuous_parts = action[1:]
+
+        # 2. 组装成环境期望的 Tuple 格式
+        hybrid_action = (ue_id, continuous_parts)
+
+        # 3. 将解码后的动作传递给原始环境
+        return self.env.step(hybrid_action)
+
+    # reset 方法不需要修改，它会自动调用底层环境的 reset
+
+
 def run_experiment(config: dict):
     """
     根据给定的配置字典，运行单个实验。
@@ -306,10 +352,11 @@ def run_vanilla_sac(config: dict):
 
     # 使用的是纯连续的环境v0
     env1 = make_vec_env(
-        "UAVEnv-v0",
-        n_envs=8,
+        "UAVEnv-v1",
+        n_envs=4,
         vec_env_cls=SubprocVecEnv,  # 使用SubprocVecEnv来真正利用多核CPU
         seed=SEED,  # 设置随机种子以确保可重复性
+        wrapper_class=SACWrapper,  # 使用SAC专用的包装器
     )
     log_path = os.path.join("logs", experiment_name)
     save_path = os.path.join("models", experiment_name)
@@ -433,6 +480,8 @@ def run_diffusion_sac(config: dict):
     experiment_name = config.get("experiment_name", "Diffusion-SAC-UAV")
     wrapper_kwargs = config.get("wrapper_kwargs", {})
     policy_kwargs = config.get("policy_kwargs", {})
+    policy_kwargs["lr_actor_schedule"] = linear_schedule(lr_actor_initial)
+    policy_kwargs["lr_critic_schedule"] = linear_schedule(lr_critic_initial)
     qne_k_samples = config.get("qne_k_samples", 32)
     total_timesteps = config.get("total_timesteps", 1_000_000)
     learning_rate = config.get("learning_rate", 3e-4)
@@ -475,7 +524,7 @@ def run_diffusion_sac(config: dict):
         env=env,  # <-- 传入被包裹后的环境
         tensorboard_log=log_path,  # 保存日志用于TensorBoard可视化
         verbose=1,
-        learning_starts=10000,  # 经验回放开始训练的步数
+        learning_starts=20000,  # 经验回放开始训练的步数
         qne_k_samples=qne_k_samples,  # QNE中的K值
         policy_kwargs=policy_kwargs,  # 传入扩散模型和QNE所需的特定超参数
         learning_rate=learning_rate,  # 学习率
@@ -553,7 +602,7 @@ def test_model():
     import os
     import re
 
-    model_dir = os.path.join("SAC_v0_model", "models")
+    model_dir = os.path.join("models", "Vanilla-SAC")
     if not os.path.isdir(model_dir):
         print(f"错误：模型目录 '{model_dir}' 不存在。")
         return
@@ -562,7 +611,7 @@ def test_model():
     model_files = [
         f
         for f in os.listdir(model_dir)
-        if f.startswith("sac_model_") and f.endswith(".zip")
+        if f.startswith("Vanilla-SAC_") and f.endswith(".zip")
     ]
 
     if not model_files:
@@ -574,7 +623,7 @@ def test_model():
     latest_model_file = ""
     for filename in model_files:
         # 使用正则表达式从 'sac_model_1751615810.zip' 中提取数字
-        match = re.search(r"sac_model_(\d+)\.zip", filename)
+        match = re.search(r"Vanilla-SAC_(\d+)\.zip", filename)
         if match:
             timestamp = int(match.group(1))
             if timestamp > latest_timestamp:
@@ -586,7 +635,8 @@ def test_model():
     # 加载模型
     model = SAC.load(latest_model_path)
     # 创建环境
-    env = gym.make("UAVEnv-v0", render_mode="human")
+    env = gym.make("UAVEnv-v1", render_mode="human")
+    env = SACWrapper(env)  # 使用SAC专用的包装器
 
     # 确保TimeLimit生效的两种方式：
     # 方式1：直接包装（推荐）
@@ -596,30 +646,82 @@ def test_model():
     if not isinstance(env, TimeLimit):
         env = TimeLimit(env, max_episode_steps=40)
 
-    # 运行测试
-    env = TimeLimit(env, max_episode_steps=40)
-
     # 运行N个episodes进行测试
     num_episodes = 5
-
     for episode in range(num_episodes):
-        # 设置当前episode编号
-        env._current_episode = episode + 1
-
         obs, _ = env.reset()
         done = False
+        total_reward = 0
         while not done:
+            # 使用deterministic模式测试
             action, _ = model.predict(obs, deterministic=True)
-            obs, _, done, truncated, _ = env.step(action)
+            obs, reward, done, truncated, info = env.step(action)
+            total_reward += reward
+            # 若达到步数限制则结束
+            if truncated:
+                done = True
+        print(f"Episode {episode + 1} finished. Total reward: {total_reward:.2f}")
+        env.render()
 
-            # 强制检查步数限制
-            if env._elapsed_steps >= 40:
-                truncated = True
-                break
+    env.close()
 
-        print(f"Episode {episode + 1} finished")
-        env.render()  # 这会阻塞直到窗口关闭
 
+def test_diffusion_sac():
+    import re
+
+    model_dir = os.path.join("models", "Diffusion-SAC")
+    if not os.path.isdir(model_dir):
+        print(f"错误：模型目录 '{model_dir}' 不存在。")
+        return
+
+    # 找到所有符合命名格式的模型文件
+    model_files = [
+        f
+        for f in os.listdir(model_dir)
+        if f.startswith("Diffusion-SAC") and f.endswith(".zip")
+    ]
+    if not model_files:
+        print(f"错误：在目录 '{model_dir}' 中没有找到任何模型文件。")
+        return
+
+    # 从文件名中提取时间戳，选择最新的文件
+    latest_timestamp = -1
+    latest_model_file = ""
+    for filename in model_files:
+        # 示例文件名格式: "Diffusion-SAC-UAV_1751615810.zip"
+        match = re.search(r"Diffusion-SAC_(\d+)\.zip", filename)
+        if match:
+            timestamp = int(match.group(1))
+            if timestamp > latest_timestamp:
+                latest_timestamp = timestamp
+                latest_model_file = filename
+
+    latest_model_path = os.path.join(model_dir, latest_model_file)
+    print(f"加载最新模型：{latest_model_path}")
+
+    # 加载模型
+    model = DiffusionSACAgent.load(latest_model_path)
+
+    # 构造环境：使用 "UAVEnv-v1" 并包装为带 TimeLimit 的环境
+    env = gym.make("UAVEnv-v1", render_mode="human")
+    env = UAVEnvWrapper(env, ue_embedding_dim=8)  # 使用自定义包装器
+    env = TimeLimit(env, max_episode_steps=40)
+
+    num_episodes = 5
+    for episode in range(num_episodes):
+        obs, _ = env.reset()
+        done = False
+        total_reward = 0
+        while not done:
+            # 使用deterministic模式测试
+            action, _ = model.predict(obs, deterministic=True)
+            obs, reward, done, truncated, info = env.step(action)
+            total_reward += reward
+            # 若达到步数限制则结束
+            if truncated:
+                done = True
+        print(f"Episode {episode + 1} finished. Total reward: {total_reward:.2f}")
+        env.render()
     env.close()
 
 
@@ -667,49 +769,49 @@ if __name__ == "__main__":
     # find_best_hyperparameters()
     # find_best_hyperparameters_sweep()
     # --- 这是脚本的主入口 ---
-
+    test_diffusion_sac()
     # 1. 创建一个命令行参数解析器
-    parser = argparse.ArgumentParser(
-        description="Run RL experiments based on a YAML config file."
-    )
+    # parser = argparse.ArgumentParser(
+    #     description="Run RL experiments based on a YAML config file."
+    # )
 
-    # 2. 添加我们需要的命令行参数
-    parser.add_argument(
-        "--config",
-        type=str,
-        required=True,
-        help="Path to the experiment configuration YAML file (e.g., experiments.yaml)",
-    )
-    parser.add_argument(
-        "--name",
-        type=str,
-        required=True,
-        help="The 'experiment_name' from the config file to run.",
-    )
+    # # 2. 添加我们需要的命令行参数
+    # parser.add_argument(
+    #     "--config",
+    #     type=str,
+    #     required=True,
+    #     help="Path to the experiment configuration YAML file (e.g., experiments.yaml)",
+    # )
+    # parser.add_argument(
+    #     "--name",
+    #     type=str,
+    #     required=True,
+    #     help="The 'experiment_name' from the config file to run.",
+    # )
 
-    # 3. 解析传入的参数
-    args = parser.parse_args()
+    # # 3. 解析传入的参数
+    # args = parser.parse_args()
 
-    # 4. 加载YAML配置文件
-    try:
-        with open(args.config, "r", encoding="utf-8") as f:
-            all_experiments = yaml.safe_load(f)
-    except FileNotFoundError:
-        print(f"Error: Config file not found at {args.config}")
-        exit(1)
+    # # 4. 加载YAML配置文件
+    # try:
+    #     with open(args.config, "r", encoding="utf-8") as f:
+    #         all_experiments = yaml.safe_load(f)
+    # except FileNotFoundError:
+    #     print(f"Error: Config file not found at {args.config}")
+    #     exit(1)
 
-    # 5. 查找与传入的 --name 匹配的实验配置
-    experiment_config = None
-    for exp in all_experiments:
-        if (
-            exp["experiment_name"] == args.name
-        ):  # 匹配命令行输入的--name 也就是args.name是否和yaml文件里哪个exp的experiment_name一致
-            experiment_config = exp
-            break
+    # # 5. 查找与传入的 --name 匹配的实验配置
+    # experiment_config = None
+    # for exp in all_experiments:
+    #     if (
+    #         exp["experiment_name"] == args.name
+    #     ):  # 匹配命令行输入的--name 也就是args.name是否和yaml文件里哪个exp的experiment_name一致
+    #         experiment_config = exp
+    #         break
 
-    # 6. 如果找到了配置，就运行实验
-    if experiment_config:
-        run_experiment(experiment_config)
-    else:
-        print(f"Error: Experiment with name '{args.name}' not found in {args.config}")
-        exit(1)
+    # # 6. 如果找到了配置，就运行实验
+    # if experiment_config:
+    #     run_experiment(experiment_config)
+    # else:
+    #     print(f"Error: Experiment with name '{args.name}' not found in {args.config}")
+    #     exit(1)

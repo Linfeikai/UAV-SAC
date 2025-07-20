@@ -30,10 +30,10 @@
   experiment_name: "Diffusion-SAC"
   agent_type: "diffusion_sac"
   learning_rate: 0.00003
-  total_timesteps: 50000
-  qne_k_samples: 64 # QNE中的K值 表示每次生成几个候选解
+  total_timesteps: 100000
+  qne_k_samples: 8 # QNE中的K值 表示每次生成几个候选解
   policy_kwargs:
-    T: 20 # 扩散模型的时间步数
+    T: 5 # 扩散模型的时间步数
     net_arch: [256, 256] # 神经网络的架构
   wrapper_kwargs:
     ue_embedding_dim: 8 # 用户设备的嵌入向量维度

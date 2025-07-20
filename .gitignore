@@ -3,6 +3,7 @@ output/
 .idea/
 model/
 wandb/
+models/
 td3_model/
 sac_hybrid_logs/
 hybridSAC_v0_model/
