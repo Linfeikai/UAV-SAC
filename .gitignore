@@ -2,6 +2,7 @@ episodeImage/
 output/
 .idea/
 model/
+models/
 wandb/
 models/
 td3_model/
