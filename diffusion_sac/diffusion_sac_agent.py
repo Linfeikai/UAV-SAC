@@ -192,13 +192,13 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
             # 2. --- Critic Loss 计算 (与标准SAC非常相似) ---
             with th.no_grad():
                 # 使用 Actor 生成下一状态的动作及其对数概率
-                # next_actions, next_log_prob = self.actor.action_log_prob(
-                #     replay_data.next_observations
-                # )
-                next_actions = self.actor.forward(
-                    replay_data.next_observations, deterministic=True
+                next_actions, next_log_prob = self.actor.action_log_prob(
+                    replay_data.next_observations
                 )
-                next_log_prob = th.zeros(next_actions.shape[0], 1, device=self.device)
+                # next_actions = self.actor.forward(
+                # #     replay_data.next_observations, deterministic=True
+                # # )
+                # # next_log_prob = th.zeros(next_actions.shape[0], 1, device=self.device)
 
                 # 在这里，我们需要插入第一个诊断点，检查Actor的输出是否合理
                 # 【上一轮建议的“行动一”】
