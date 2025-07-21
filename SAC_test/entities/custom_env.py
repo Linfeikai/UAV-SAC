@@ -43,6 +43,7 @@ class CustomEnv(gym.Env):
         W_ENERGY_GAINED = 1.0  # 充电奖励的相对重要性
         W_FAIRNESS = 0.2  # 公平性奖励的相对重要性 (次要目标)
         W_PBRS = 0.1  # PBRS引导奖励的相对重要性 (引导项)
+        REWARD_WEIGHT_LOW_BATTERY_PENALTY = 1.5  # 低电量惩罚的相对重要性
 
         # 绝对惩罚值 (这些值不参与归一化)
         PENALTY_TASK_FAILURE = -2.0  # 任务失败的惩罚
@@ -427,7 +428,20 @@ class CustomEnv(gym.Env):
         reward_components["energy_penalty"] = -norm_consumption
 
         norm_gain = raw_harvested_energy / self.Config.NORM_ENERGY_GAINED  # 充电
-        reward_components["charge_reward"] = norm_gain
+        # norm_gain是归一化的奖励，下面再进行非线性的衰减。当电量越高时，这个奖励越低 ---
+
+        battery_ratio = self.uav.e_battery / self.uav.battery_capacity
+        # (1 - battery_ratio) 是一个衰减因子，电量越高，因子越小
+        charge_decay_factor = 1.0 - battery_ratio
+        smart_charge_reward = norm_gain * charge_decay_factor
+
+        reward_components["charge_reward"] = smart_charge_reward
+
+        # 新增：低电量惩罚 ---
+        # 使用一个S型函数，当电量低于某个阈值（如0.4）时，惩罚平滑地增加
+        # scale=15 控制曲线的陡峭程度，threshold=0.4 是惩罚开始显著增加的电量水平
+        penalty_factor = 1 / (1 + math.exp((battery_ratio - 0.4) * 15))
+        reward_components["low_battery_penalty"] = penalty_factor
 
         norm_pbrs = (
             raw_flying_distance / self.Config.NORM_FLYING_DISTANCE
@@ -436,22 +450,12 @@ class CustomEnv(gym.Env):
 
         reward_components["fairness_improvement"] = fairness_improvement
 
-        # # --- 新增：低电量惩罚 ---
-        # low_battery_penalty = 0.0
-        # # --- 改进：使用平滑函数计算低电量惩罚 ---
-        # # 使用一个S型函数，当电量低于某个阈值（如0.4）时，惩罚平滑地增加
-        # battery_ratio = self.uav.e_battery / self.uav.battery_capacity
-        # # scale=15 控制曲线的陡峭程度，threshold=0.4 是惩罚开始显著增加的电量水平
-        # penalty_factor = 1 / (1 + math.exp((battery_ratio - 0.4) * 15))
-        # low_battery_penalty = (
-        #     self.Config.REWARD_WEIGHT_LOW_BATTERY_PENALTY * penalty_factor
-        # )
-
         # --- 3. 应用权重，计算核心奖励 ---
         reward = 0.0
         reward -= self.Config.W_DELAY * norm_delay
         reward -= self.Config.W_ENERGY_CONSUMED * norm_consumption
-        reward += self.Config.W_ENERGY_GAINED * norm_gain
+        reward -= self.Config.REWARD_WEIGHT_LOW_BATTERY_PENALTY * penalty_factor
+        reward += self.Config.W_ENERGY_GAINED * smart_charge_reward
         reward += self.Config.W_PBRS * norm_pbrs
         reward += self.Config.W_FAIRNESS * fairness_improvement
 
