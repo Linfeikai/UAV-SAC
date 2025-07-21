@@ -953,6 +953,10 @@ class CustomEnv(gym.Env):
                     d.get("fairness_improvement", 0)
                     for d in self.reward_components_history
                 ],
+                "low_battery": [
+                    d.get("low_battery_penalty", 0)
+                    for d in self.reward_components_history
+                ],
             }
 
             # 绘制正奖励
