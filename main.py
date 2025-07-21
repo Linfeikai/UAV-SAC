@@ -29,7 +29,7 @@ from wandb.integration.sb3 import WandbCallback
 import pandas as pd  # Optional, but helpful
 import os
 import torch as th
-
+import sys
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 
@@ -366,6 +366,7 @@ def run_vanilla_sac(config: dict):
     wandb.init(
         project="SAC-new-env",  # 项目名称（wandb 仪表盘中显示）
         name=experiment_name,  # 实验名称（可选）
+        notes="modified env reward setting.battery-related to solve reward hacking.",
         # config={  # 记录超参数（可选）
         #     # "policy": "MlpPolicy",
         #     "total_timesteps": 100000,
@@ -769,49 +770,68 @@ if __name__ == "__main__":
     # find_best_hyperparameters()
     # find_best_hyperparameters_sweep()
     # --- 这是脚本的主入口 ---
-    test_diffusion_sac()
+    # test_diffusion_sac()
     # 1. 创建一个命令行参数解析器
-    # parser = argparse.ArgumentParser(
-    #     description="Run RL experiments based on a YAML config file."
-    # )
+    parser = argparse.ArgumentParser(
+        description="Run RL experiments based on a YAML config file."
+    )
 
-    # # 2. 添加我们需要的命令行参数
-    # parser.add_argument(
-    #     "--config",
-    #     type=str,
-    #     required=True,
-    #     help="Path to the experiment configuration YAML file (e.g., experiments.yaml)",
-    # )
-    # parser.add_argument(
-    #     "--name",
-    #     type=str,
-    #     required=True,
-    #     help="The 'experiment_name' from the config file to run.",
-    # )
+    # 2. 添加我们需要的命令行参数
+    parser.add_argument(
+        "--config",
+        type=str,
+        # required=True,
+        help="Path to the experiment configuration YAML file (e.g., experiments.yaml)",
+    )
+    parser.add_argument(
+        "--name",
+        type=str,
+        # required=True,
+        help="The 'experiment_name' from the config file to run.",
+    )
+    parser.add_argument(
+        "--evaluate",
+        type=str,
+        default=None,
+        choices=["sac", "diffusion", "both"],
+        help="evaluate trained model: sac, diffusion or both.",
+    )
 
-    # # 3. 解析传入的参数
-    # args = parser.parse_args()
+    # 3. 解析传入的参数
+    args = parser.parse_args()
+    # 如果传入 --debug 参数，则直接运行对应的测试函数
+    if args.evaluate:
+        if args.evaluate in ["sac", "both"]:
+            print("Running test_model...")
+            test_model()
+        if args.evaluate in ["diffusion", "both"]:
+            print("Running test_diffusion...")
+            test_diffusion_sac()
+        sys.exit(0)
 
-    # # 4. 加载YAML配置文件
-    # try:
-    #     with open(args.config, "r", encoding="utf-8") as f:
-    #         all_experiments = yaml.safe_load(f)
-    # except FileNotFoundError:
-    #     print(f"Error: Config file not found at {args.config}")
-    #     exit(1)
+    # 原有逻辑：根据 YAML 配置文件运行实验
+    if not args.config or not args.name:
+        parser.print_help()
+        sys.exit(1)
+    try:
+        with open(args.config, "r", encoding="utf-8") as f:
+            all_experiments = yaml.safe_load(f)
+    except FileNotFoundError:
+        print(f"Error: Config file not found at {args.config}")
+        sys.exit(1)
 
-    # # 5. 查找与传入的 --name 匹配的实验配置
-    # experiment_config = None
-    # for exp in all_experiments:
-    #     if (
-    #         exp["experiment_name"] == args.name
-    #     ):  # 匹配命令行输入的--name 也就是args.name是否和yaml文件里哪个exp的experiment_name一致
-    #         experiment_config = exp
-    #         break
+    # 5. 查找与传入的 --name 匹配的实验配置
+    experiment_config = None
+    for exp in all_experiments:
+        if (
+            exp["experiment_name"] == args.name
+        ):  # 匹配命令行输入的--name 也就是args.name是否和yaml文件里哪个exp的experiment_name一致
+            experiment_config = exp
+            break
 
-    # # 6. 如果找到了配置，就运行实验
-    # if experiment_config:
-    #     run_experiment(experiment_config)
-    # else:
-    #     print(f"Error: Experiment with name '{args.name}' not found in {args.config}")
-    #     exit(1)
+    # 6. 如果找到了配置，就运行实验
+    if experiment_config:
+        run_experiment(experiment_config)
+    else:
+        print(f"Error: Experiment with name '{args.name}' not found in {args.config}")
+        sys.exit(1)
