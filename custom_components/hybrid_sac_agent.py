@@ -502,10 +502,10 @@ class HybridSAC(
         # --- 学习率更新逻辑结束 ---
 
         # 更新优化器学习率
-        optimizers = [self.actor.optimizer, self.critic.optimizer]
-        if self.ent_coef_optimizer is not None:
-            optimizers += [self.ent_coef_optimizer]
-        self._update_learning_rate(optimizers)
+        # optimizers = [self.actor.optimizer, self.critic.optimizer]
+        # if self.ent_coef_optimizer is not None:
+        #     optimizers += [self.ent_coef_optimizer]
+        # self._update_learning_rate(optimizers)
 
         ent_coef_losses, ent_coefs = [], []
         actor_losses, critic_losses = [], []

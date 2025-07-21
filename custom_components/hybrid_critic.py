@@ -61,6 +61,8 @@ class HybridCritic(BaseModel):  # 或者 nn.Module
 
         discrete_action_dim = self.discrete_action_space.n
         continuous_action_dim = get_action_dim(self.continuous_action_space)
+        self.share_features_extractor = share_features_extractor
+
 
         if not isinstance(self.discrete_action_space, spaces.Discrete):
             raise ValueError("First element of action_space Tuple must be Discrete.")
