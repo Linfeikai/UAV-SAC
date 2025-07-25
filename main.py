@@ -60,13 +60,17 @@ register(
 # 1. 定义两个不同的初始学习率
 # Actor可以快一点，因为它需要探索。Critic必须稳，所以让它慢得多。
 lr_actor_initial = 3e-5  # 保持原来的值
-lr_critic_initial = 3e-4  # 降低一个数量级
+lr_critic_initial = 3e-4  # 升高一个数量级
+lr_final = 1e-5  # 最终学习率
 
 
 # 2. 为它们分别创建衰减函数
-def linear_schedule(initial_value: float):
+def linear_schedule(initial_value: float, final_value: float = lr_final):
+    # 确保初始值不小于最终值
+    assert initial_value >= final_value, "初始学习率必须大于或等于最终学习率"
+
     def func(progress_remaining: float) -> float:
-        return progress_remaining * initial_value
+        return (initial_value - final_value) * progress_remaining + final_value
 
     return func
 
@@ -364,9 +368,9 @@ def run_vanilla_sac(config: dict):
     os.makedirs(save_path, exist_ok=True)  # 确保模型保存目录存在
 
     wandb.init(
-        project="SAC-new-env",  # 项目名称（wandb 仪表盘中显示）
+        project="SAC-env-adjust-fairness",  # 项目名称（wandb 仪表盘中显示）
         name=experiment_name,  # 实验名称（可选）
-        notes="modified env reward setting.battery-related to solve reward hacking.",
+        notes="temperature=0.05",  # 实验备注（可选）
         # config={  # 记录超参数（可选）
         #     # "policy": "MlpPolicy",
         #     "total_timesteps": 100000,
@@ -483,7 +487,7 @@ def run_diffusion_sac(config: dict):
     policy_kwargs = config.get("policy_kwargs", {})
     policy_kwargs["lr_actor_schedule"] = linear_schedule(lr_actor_initial)
     policy_kwargs["lr_critic_schedule"] = linear_schedule(lr_critic_initial)
-    qne_k_samples = config.get("qne_k_samples", 32)
+    qne_k_samples = config.get("qne_k_samples", 8)
     total_timesteps = config.get("total_timesteps", 1_000_000)
     learning_rate = config.get("learning_rate", 3e-4)
     # 保存log和model的路径
@@ -497,14 +501,15 @@ def run_diffusion_sac(config: dict):
         "UAVEnv-v1",
         n_envs=num_envs,  # 创建多个并行环境
         wrapper_class=UAVEnvWrapper,  # 使用自定义的包装器
-        wrapper_kwargs=wrapper_kwargs,  # 传递包装器参数
+        # wrapper_kwargs=wrapper_kwargs,  # 传递包装器参数
         vec_env_cls=SubprocVecEnv,  # 使用SubprocVecEnv来真正利用多核CPU
         seed=SEED,  # 设置随机种子以确保可重复性
     )
     # 2.初始化wandb
     wandb.init(
-        project="SAC-new-env",  # 项目名称（wandb 仪表盘中显示）
+        project="SAC-env-adjust-fairness",  # 项目名称（wandb 仪表盘中显示）
         name=experiment_name,  # 实验名称（可选）
+        notes="temperature=0.02,T_step=20(from 5)",  # 实验备注（可选）
         config={  # 记录超参数（可选）
             # "policy": "MlpPolicy",
             "total_timesteps": total_timesteps,
