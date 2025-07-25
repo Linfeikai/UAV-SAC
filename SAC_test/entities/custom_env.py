@@ -39,9 +39,9 @@ class CustomEnv(gym.Env):
     class Config:
         # 权重
         W_DELAY = 1.5  # 延迟惩罚的相对重要性
-        W_ENERGY_CONSUMED = 1.0  # 能耗惩罚的相对重要性
-        W_ENERGY_GAINED = 1.0  # 充电奖励的相对重要性
-        W_FAIRNESS = 0.2  # 公平性奖励的相对重要性 (次要目标)
+        W_ENERGY_CONSUMED = 0.5  # 能耗惩罚的相对重要性
+        W_ENERGY_GAINED = 0.5  # 充电奖励的相对重要性
+        W_FAIRNESS = 10  # 公平性奖励的相对重要性 (次要目标)
         W_PBRS = 0.1  # PBRS引导奖励的相对重要性 (引导项)
         REWARD_WEIGHT_LOW_BATTERY_PENALTY = 1.5  # 低电量惩罚的相对重要性
 

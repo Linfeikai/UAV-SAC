@@ -67,7 +67,7 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
         # --- 新增的扩散模型特定参数 ---
         qne_k_samples: int = 32,  # QNE中的K值，即"头脑风暴"的样本数
         policy_kwargs: Optional[Dict[str, Any]] = None,
-        qne_temperature: float = 0.1,
+        qne_temperature: float = 0.02,
         # --- 其他标准参数 ---
         tensorboard_log: Optional[str] = None,
         verbose: int = 0,
