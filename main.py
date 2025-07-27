@@ -90,6 +90,10 @@ from stable_baselines3.common.callbacks import BaseCallback
 from typing import Optional, List, Dict, Any
 
 
+from stable_baselines3.common.monitor import Monitor
+import gymnasium as gym
+
+
 class ParallelEpisodeMetricCallback(BaseCallback):
     """
     A callback to correctly track and log metrics from multiple parallel environments.
@@ -483,13 +487,18 @@ def run_diffusion_sac(config: dict):
     # Wrapper 和 Policy 的参数
     # 注意：wrapper_kwargs 是用来传递给 Wrapper 的构造函数的
     experiment_name = config.get("experiment_name", "Diffusion-SAC-UAV")
+
     wrapper_kwargs = config.get("wrapper_kwargs", {})
     policy_kwargs = config.get("policy_kwargs", {})
     policy_kwargs["lr_actor_schedule"] = linear_schedule(lr_actor_initial)
     policy_kwargs["lr_critic_schedule"] = linear_schedule(lr_critic_initial)
     qne_k_samples = config.get("qne_k_samples", 8)
     total_timesteps = config.get("total_timesteps", 1_000_000)
-    learning_rate = config.get("learning_rate", 3e-4)
+    learning_starts = config.get("learning_starts", 50000)  # 经验回放开始训练的步数
+    # learning_rate = config.get("learning_rate", 3e-4)
+    qne_temperature = config.get(
+        "qne_temperature", 5.0
+    )  # QNE的温度参数，用于控制Softmax的平滑度
     # 保存log和model的路径
     log_path = os.path.join("logs", experiment_name)
     save_path = os.path.join("models", experiment_name)
@@ -507,15 +516,17 @@ def run_diffusion_sac(config: dict):
     )
     # 2.初始化wandb
     wandb.init(
-        project="SAC-env-adjust-fairness",  # 项目名称（wandb 仪表盘中显示）
+        project="SAC-find_out",  # 项目名称（wandb 仪表盘中显示）
         name=experiment_name,  # 实验名称（可选）
-        notes="temperature=0.02,T_step=20(from 5)",  # 实验备注（可选）
+        notes="entropy_scale=0.5",  # 实验备注（可选）
         config={  # 记录超参数（可选）
             # "policy": "MlpPolicy",
             "total_timesteps": total_timesteps,
-            "qne_k_samples": qne_k_samples,
+            # "qne_k_samples": qne_k_samples,
             "T_steps": policy_kwargs["T"],
             "ue_embedding_dim": wrapper_kwargs["ue_embedding_dim"],
+            "learning_starts": learning_starts,  # 经验回放开始训练的步数
+            "qne_temperature": 5.0,
             # "fairness_penalty_weight": 10.0,  # 公平性惩罚权重
         },
         sync_tensorboard=True,  # auto-upload sb3's tensorboard metrics
@@ -530,10 +541,11 @@ def run_diffusion_sac(config: dict):
         env=env,  # <-- 传入被包裹后的环境
         tensorboard_log=log_path,  # 保存日志用于TensorBoard可视化
         verbose=1,
-        learning_starts=20000,  # 经验回放开始训练的步数
+        learning_starts=learning_starts,  # 经验回放开始训练的步数
         qne_k_samples=qne_k_samples,  # QNE中的K值
         policy_kwargs=policy_kwargs,  # 传入扩散模型和QNE所需的特定超参数
-        learning_rate=learning_rate,  # 学习率
+        # learning_rate=learning_rate,  # 学习率
+        qne_temperature=qne_temperature,  # QNE的温度参数
         # ... 其他所有超参数 ...
     )
 
@@ -601,6 +613,143 @@ def find_best_hyperparameters_sweep():
     wandb.agent(
         sweep_id, function=SAC_hybrid_test, entity="SACtest", count=10
     )  # 运行30次实验
+
+
+def get_sweep_config() -> dict:
+    """
+    返回 Wandb Sweep 的配置字典。
+    """
+    sweep_configuration = {
+        "name": "DiffusionSAC-UAV-Optimization-Sweep",  # 给这次扫描起个名字
+        "method": "bayes",  # 使用贝叶斯优化，它比随机搜索更高效
+        "metric": {
+            "name": "rollout/ep_rew_mean",  # 优化的目标指标
+            "goal": "maximize",  # 目标是最大化这个指标
+        },
+        "parameters": {
+            # --- 学习率: Actor vs Critic ---
+            "lr_actor": {
+                "distribution": "log_uniform_values",
+                "min": 1e-5,
+                "max": 5e-4,
+            },
+            "lr_critic": {
+                "distribution": "log_uniform_values",
+                "min": 1e-5,
+                "max": 5e-4,
+            },
+            # --- 算法核心超参数 ---
+            "qne_temperature": {
+                "distribution": "uniform",
+                "min": 0.01,
+                "max": 5.0,
+            },
+            "learning_starts": {"values": [10000, 25000, 30000]},
+            # --- 扩散模型特定参数 ---
+            "T_steps": {
+                "values": [5, 10, 20]  # 扩散步数
+            },
+            "qne_k_samples": {
+                "values": [8, 16, 32]  # "头脑风暴"样本数
+            },
+            # # --- 网络结构 ---先不考虑吧
+            # "net_arch_actor": {"values": [[256, 256], [512, 512]]},
+            # "net_arch_critic": {"values": [[256, 256], [512, 512]]},
+        },
+        "early_terminate": {  # 提前终止不佳的实验，节省资源
+            "type": "hyperband",
+            "min_iter": 100000,  # 至少跑完100k步再做判断
+        },
+    }
+    return sweep_configuration
+
+
+def train_for_sweep():
+    """
+    为Wandb Sweep执行单次训练的函数。
+    它会自动从 wandb.config 中读取超参数。
+    """
+    # 1. 初始化Wandb run
+    # name可以由Wandb自动生成，也可以自定义
+    run = wandb.init(project="SAC-find_out-sweep", reinit=True)
+
+    # 2. 从 wandb.config 中提取超参数
+    #    这里我们给每个参数提供一个默认值，以防万一
+    config = wandb.config
+
+    num_envs = 4
+    total_timesteps = 100000  # 在sweep中，可以适当减少总步数以加快速度
+
+    # 从config中获取学习率
+    lr_actor_initial = config.get("lr_actor", 3e-4)
+    lr_critic_initial = config.get("lr_critic", 3e-4)
+
+    # 创建独立的学习率调度器
+    lr_actor_schedule_sweep = linear_schedule(lr_actor_initial)
+    lr_critic_schedule_sweep = linear_schedule(lr_critic_initial)
+
+    # 封装policy_kwargs
+    policy_kwargs = {
+        "T": config.get("T_steps", 5),
+        "net_arch": {
+            "pi": config.get("net_arch_actor", [256, 256]),
+            "qf": config.get("net_arch_critic", [256, 256]),
+        },
+        "lr_actor_schedule": lr_actor_schedule_sweep,
+        "lr_critic_schedule": lr_critic_schedule_sweep,
+    }
+
+    # 封装wrapper_kwargs (如果需要的话)
+    wrapper_kwargs = {"ue_embedding_dim": 8}  # 假设这个是固定的
+
+    # 3. 创建环境 (这部分与 run_diffusion_sac 相同)
+    log_path = os.path.join("logs", f"sweep-{run.id}")
+    os.makedirs(log_path, exist_ok=True)
+
+    env = make_vec_env(
+        "UAVEnv-v1",
+        n_envs=num_envs,
+        wrapper_class=UAVEnvWrapper,
+        wrapper_kwargs=wrapper_kwargs,
+        vec_env_cls=SubprocVecEnv,
+        seed=SEED,
+    )
+
+    # 4. 创建并训练Agent (与 run_diffusion_sac 类似)
+    model = DiffusionSACAgent(
+        policy="DiffusionSACPolicy",
+        env=env,
+        tensorboard_log=log_path,
+        verbose=0,  # 在sweep中通常关闭详细日志
+        learning_starts=config.get("learning_starts", 25000),
+        qne_k_samples=config.get("qne_k_samples", 16),
+        qne_temperature=config.get("qne_temperature", 5.0),
+        policy_kwargs=policy_kwargs,
+        # 注意: 主学习率 learning_rate 不再需要，因为它被policy_kwargs中的调度器覆盖了
+    )
+
+    # 创建回调函数
+    # 在Sweep中，WandbCallback会自动处理所有事情
+    # ParallelEpisodeMetricCallback 依然有用，因为它计算了我们需要的 ep_rew_mean
+    metric_callback = ParallelEpisodeMetricCallback()
+    wandb_callback = WandbCallback(
+        # 你可以配置梯度和模型保存，如果不需要可以留空
+        # model_save_path=f"models/{run.id}",
+        verbose=2
+    )
+    callback_list = CallbackList([metric_callback, wandb_callback])
+
+    print(f"--- Starting Sweep Run: {run.name} with config: {dict(config)} ---")
+
+    try:
+        model.learn(
+            total_timesteps=total_timesteps,
+            log_interval=100,  # 可以增加log间隔
+            callback=callback_list,
+        )
+    finally:
+        # 确保每个run都正确结束
+        run.finish()
 
 
 def test_model():
@@ -801,9 +950,53 @@ if __name__ == "__main__":
         choices=["sac", "diffusion", "both"],
         help="evaluate trained model: sac, diffusion or both.",
     )
+    parser.add_argument(
+        "--sweep",
+        type=str,
+        default=None,
+        help="Run a Wandb sweep. Use '--sweep new' to start a new one, or '--sweep <SWEEP_ID>' to resume an existing one.",
+    )
+    parser.add_argument(
+        "--count",
+        type=int,
+        default=5,  # 默认运行5次实验
+        help="Number of runs to execute in the sweep.",
+    )
 
     # 3. 解析传入的参数
     args = parser.parse_args()
+    # ================= 优先处理Sweep逻辑 =================
+    if args.sweep:
+        sweep_id = None
+        project_name = "SAC-find_out-sweep"  # 定义你的sweep项目名称
+
+        if args.sweep == "new":
+            print("--- 启动一个新的 Wandb Sweep ---")
+            # 如果没有提供sweep_id，就创建一个新的
+            sweep_config = (
+                get_sweep_config()
+            )  # 确保 get_sweep_config() 函数在之前已经定义好
+            sweep_id = wandb.sweep(sweep=sweep_config, project=project_name)
+            print(f"新的 Sweep 已创建, ID: {sweep_id}")
+        else:
+            # 如果提供了值，且不是'new'，我们就认为它是一个sweep_id
+            sweep_id = args.sweep
+            print(f"--- 继续已有的 Sweep, ID: {sweep_id} ---")
+
+        # 使用获取到的 sweep_id 启动 agent
+        # 确保 train_for_sweep() 函数也已经定义好
+        print(f"启动 Agent, 将执行 {args.count} 次实验...")
+        wandb.agent(
+            sweep_id,
+            function=train_for_sweep,
+            count=args.count,
+            project=project_name,  # 明确指定项目，避免混淆
+        )
+        sys.exit(0)  # Sweep结束后正常退出脚本
+    # ======================================================
+
+    # ======================================================
+
     # 如果传入 --debug 参数，则直接运行对应的测试函数
     if args.evaluate:
         if args.evaluate in ["sac", "both"]:
