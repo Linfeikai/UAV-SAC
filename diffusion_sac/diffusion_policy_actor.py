@@ -153,6 +153,7 @@ class DiffusionPolicyActor(BasePolicy):
         T_steps: int = 50,  # 扩散总步数
         log_prob_monte_carlo_samples: int = 10,  # 计算log_prob时的蒙特卡洛采样数
         normalize_images: bool = True,
+        entropy_scale: float = 0.5,  # 默认值为 1.0，保持原样
         **kwargs,  # 忽略其他来自Policy的参数
     ):
         super().__init__(
@@ -171,6 +172,7 @@ class DiffusionPolicyActor(BasePolicy):
         self.features_dim = features_dim
         self.T = T_steps
         self.N_log_prob = log_prob_monte_carlo_samples
+        self.entropy_scale = entropy_scale
 
         # --- 实例化核心组件 ---
         # 1. 噪声预测网络 EpsilonNet
@@ -244,85 +246,96 @@ class DiffusionPolicyActor(BasePolicy):
         # 4. 返回最终的干净动作
         return torch.tanh(action_t)  # <-- 关键修正！
 
+    # def action_log_prob(self, obs: PyTorchObs) -> Tuple[torch.Tensor, torch.Tensor]:
+    #     """
+    #     这个方法在SAC中用于计算Actor Loss。
+    #     对于扩散模型，Actor Loss的计算方式完全不同 (使用QNE)。
+    #     因此，这个方法主要在训练Critic时，提供下一个动作的log_prob。
+    #     """
+    #     # 1. 提取状态特征
+    #     features = self.extract_features(obs, self.features_extractor)
+
+    #     # 2. 生成一个动作样本 (与 forward 逻辑相同)
+    #     # 注意：这里生成的动作是用于计算 Critic loss 的下一个动作 (next_action)
+    #     sampled_action = self.forward(obs, deterministic=False)
+
+    #     # 3. 计算这个生成动作的对数概率 (使用数值积分)
+    #     # 这是一个计算密集型操作
+    #     batch_size = features.shape[0]
+
+    #     # 准备一个变量来累积所有时间步的误差项
+    #     total_mse_terms = torch.zeros(batch_size, 1, device=self.device)
+
+    #     # 在所有时间步上进行近似积分
+    #     for t_step in range(1, self.T + 1):
+    #         t = torch.full(
+    #             (batch_size, 1), t_step, device=self.device, dtype=torch.long
+    #         )
+
+    #         # 蒙特卡洛采样来估计期望误差
+    #         mse_at_t = 0
+    #         for _ in range(self.N_log_prob):
+    #             epsilon = torch.randn_like(sampled_action)
+
+    #             # 加噪
+    #             sqrt_alpha_bar = self.sqrt_alphas_cumprod.gather(
+    #                 0, t.squeeze(-1) - 1
+    #             ).reshape(-1, 1)
+    #             sqrt_one_minus_alpha_bar = self.sqrt_one_minus_alphas_cumprod.gather(
+    #                 0, t.squeeze(-1) - 1
+    #             ).reshape(-1, 1)
+    #             noisy_action = (
+    #                 sqrt_alpha_bar * sampled_action + sqrt_one_minus_alpha_bar * epsilon
+    #             )
+
+    #             # 预测噪声并计算误差
+    #             predicted_noise = self._epsilon_net(features, noisy_action, t)
+    #             mse_at_t += torch.sum(
+    #                 (epsilon - predicted_noise) ** 2, dim=-1, keepdim=True
+    #             )
+
+    #         average_mse_at_t = mse_at_t / self.N_log_prob
+
+    #         # 根据论文公式累加项 (这是一个简化的表达，精确公式更复杂)
+    #         # 这里的权重依赖于 alpha 和 beta
+    #         weight = (self.betas[t_step - 1] ** 2) / (
+    #             2
+    #             * (1.0 - self.alphas_cumprod[t_step - 1])
+    #             * (1.0 - self.betas[t_step - 1])
+    #         )
+    #         total_mse_terms += weight * average_mse_at_t
+
+    #     # 最终的log_prob是这些项的负和，加上一个常数
+    #     # 注意: 精确的log_prob计算非常复杂，这里提供的是一个近似思路
+    #     # 在很多实现中，可能会用更简化的方式处理熵项
+    #     log_prob = -total_mse_terms
+
+    #     return sampled_action, log_prob
+
     def action_log_prob(self, obs: PyTorchObs) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        这个方法在SAC中用于计算Actor Loss。
-        对于扩散模型，Actor Loss的计算方式完全不同 (使用QNE)。
-        因此，这个方法主要在训练Critic时，提供下一个动作的log_prob。
+        [修正后的版本]
+        使用一个简单、稳健的熵代理 (Entropy Proxy) 来为 SAC 提供熵信号。
+        这个代理鼓励生成的动作不要离一个标准正态分布太远。
         """
-        # 1. 提取状态特征
-        features = self.extract_features(obs, self.features_extractor)
-
-        # 2. 生成一个动作样本 (与 forward 逻辑相同)
-        # 注意：这里生成的动作是用于计算 Critic loss 的下一个动作 (next_action)
+        # 1. 像以前一样，正常地从扩散模型中采样一个动作
         sampled_action = self.forward(obs, deterministic=False)
 
-        # 3. 计算这个生成动作的对数概率 (使用数值积分)
-        # 这是一个计算密集型操作
-        batch_size = features.shape[0]
+        # 2. 计算熵代理：负的均方误差 (MSE)
+        #    我们希望动作的方差尽可能大（接近标准正态分布的方差1），
+        #    所以我们用它与0的MSE来作为熵的代理。
+        #    一个远离0的动作，其熵更高。
+        #    sum(-action^2) 是高斯分布 log_prob 的核心项。
+        log_prob = -torch.sum(sampled_action**2, dim=-1, keepdim=True)
 
-        # 准备一个变量来累积所有时间步的误差项
-        total_mse_terms = torch.zeros(batch_size, 1, device=self.device)
+        log_prob = log_prob * self.entropy_scale
+        # 3. [可选，但推荐] 对 log_prob 进行缩放，以匹配你环境的奖励尺度
+        #    这是一个可以调整的超参数。如果你的奖励在-50左右，
+        #    那么一个-5左右的 log_prob 是比较合适的。
+        #    你可以通过乘以一个常数来调整它。
+        # log_prob = log_prob * 0.1
 
-        # 在所有时间步上进行近似积分
-        for t_step in range(1, self.T + 1):
-            t = torch.full(
-                (batch_size, 1), t_step, device=self.device, dtype=torch.long
-            )
-
-            # 蒙特卡洛采样来估计期望误差
-            mse_at_t = 0
-            for _ in range(self.N_log_prob):
-                epsilon = torch.randn_like(sampled_action)
-
-                # 加噪
-                sqrt_alpha_bar = self.sqrt_alphas_cumprod.gather(
-                    0, t.squeeze(-1) - 1
-                ).reshape(-1, 1)
-                sqrt_one_minus_alpha_bar = self.sqrt_one_minus_alphas_cumprod.gather(
-                    0, t.squeeze(-1) - 1
-                ).reshape(-1, 1)
-                noisy_action = (
-                    sqrt_alpha_bar * sampled_action + sqrt_one_minus_alpha_bar * epsilon
-                )
-
-                # 预测噪声并计算误差
-                predicted_noise = self._epsilon_net(features, noisy_action, t)
-                mse_at_t += torch.sum(
-                    (epsilon - predicted_noise) ** 2, dim=-1, keepdim=True
-                )
-
-            average_mse_at_t = mse_at_t / self.N_log_prob
-
-            # 根据论文公式累加项 (这是一个简化的表达，精确公式更复杂)
-            # 这里的权重依赖于 alpha 和 beta
-            weight = (self.betas[t_step - 1] ** 2) / (
-                2
-                * (1.0 - self.alphas_cumprod[t_step - 1])
-                * (1.0 - self.betas[t_step - 1])
-            )
-            total_mse_terms += weight * average_mse_at_t
-
-        # 最终的log_prob是这些项的负和，加上一个常数
-        # 注意: 精确的log_prob计算非常复杂，这里提供的是一个近似思路
-        # 在很多实现中，可能会用更简化的方式处理熵项
-        log_prob = -total_mse_terms
-        # log_prob = torch.zeros_like(log_prob)  # 这里可以根据实际需要调整
-
-        return sampled_action, log_prob
-        # def action_log_prob(self, obs: PyTorchObs) -> Tuple[torch.Tensor, torch.Tensor]:
-        #     """
-        #     【已修正】这个方法在SAC中用于计算 Critic Loss 的目标值。
-        #     我们简化它，使其只提供动作和稳定的log_prob，以保证Critic学习的稳定性。
-        #     """
-        #     # 1. 调用修正后的 forward 方法来生成一个被正确挤压到 [-1, 1] 的动作
-        #     sampled_action = self.forward(obs, deterministic=False)
-
-        #     # 2. 返回一个稳定的 log_prob (暂时设为0)
-        #     # 这会有效地在 Critic 更新时忽略熵项，是稳定训练的关键一步。
-        #     batch_size = sampled_action.shape[0]
-        #     log_prob = torch.zeros(batch_size, 1, device=self.device)
-
+        # 确保 log_prob 的形状是 (batch_size, 1)
         return sampled_action, log_prob
 
     def _predict(

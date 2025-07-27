@@ -67,7 +67,7 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
         # --- 新增的扩散模型特定参数 ---
         qne_k_samples: int = 32,  # QNE中的K值，即"头脑风暴"的样本数
         policy_kwargs: Optional[Dict[str, Any]] = None,
-        qne_temperature: float = 0.02,
+        qne_temperature: float = 5.0,  # QNE的温度参数，用于控制Softmax的平滑度
         # --- 其他标准参数 ---
         tensorboard_log: Optional[str] = None,
         verbose: int = 0,
@@ -226,6 +226,11 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
 
                 # 加上熵项，计算最终的目标Q值
                 min_qf_next_target -= ent_coef_tensor * next_log_prob
+                entropy_bonus = ent_coef_tensor * next_log_prob
+                self.logger.record(
+                    "debug/entropy_bonus_mean", th.mean(entropy_bonus).item()
+                )
+
                 next_q_value = (
                     replay_data.rewards
                     + (1 - replay_data.dones) * self.gamma * min_qf_next_target
@@ -251,13 +256,19 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
             # (a) 准备计算Actor Loss所需的数据
             # 我们需要从replay_data中获取干净的动作`a` (即 `replay_data.actions`)
             # 和对应的状态`s` (即 `replay_data.observations`)
-            clean_actions_from_buffer = replay_data.actions
+            EPS = 1e-6
+
+            clean_actions_from_buffer = replay_data.actions.clamp(-1.0 + EPS, 1.0 - EPS)
+
+            unbounded_clean_actions = th.atanh(clean_actions_from_buffer)
+
+            # clean_actions_from_buffer = replay_data.actions
             states_from_buffer = replay_data.observations
 
             # (b) 随机采样扩散时间步t和真实噪声epsilon
             # 随机生成大小为 (batch_size, 1) 的时间步t
             t = th.randint(1, self.actor.T + 1, (batch_size, 1), device=self.device)
-            epsilon = th.randn_like(clean_actions_from_buffer)
+            epsilon = th.randn_like(unbounded_clean_actions)
 
             # (c) 根据公式创建加噪动作 a_t
             sqrt_alpha_bar = self.actor.sqrt_alphas_cumprod.gather(
@@ -267,7 +278,7 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
                 0, t.squeeze(-1) - 1
             ).reshape(-1, 1)
             noisy_actions_t = (
-                sqrt_alpha_bar * clean_actions_from_buffer
+                sqrt_alpha_bar * unbounded_clean_actions
                 + sqrt_one_minus_alpha_bar * epsilon
             )
             # 加噪动作=从buffer里采样的干净动作*一个系数+噪声*一个系数
@@ -301,25 +312,25 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
             states_expanded = states_from_buffer.unsqueeze(1).expand(
                 -1, self.qne_k_samples, -1
             )  # [B, 1, S_dim] -> [B, K, S_dim]
+            bounded_k_candidate_actions = th.tanh(k_candidate_actions)
 
             # ======================= 在这里加入关键的修正代码 =======================
             # 在送入Critic之前，将所有候选动作裁剪到有效范围 [-1, 1]
             # action_space.low 和 high 通常是 -1 和 1，这里用它们来确保通用性
-            action_low = self.action_space.low[0]
-            action_high = self.action_space.high[0]
-            clipped_k_candidate_actions = th.clamp(
-                k_candidate_actions.reshape(batch_size * self.qne_k_samples, -1),
-                action_low,
-                action_high,
-            )
-            # 【上一轮建议的“行动二”】
+            # action_low = self.action_space.low[0]
+            # action_high = self.action_space.high[0]
+            # clipped_k_candidate_actions = th.clamp(
+            #     k_candidate_actions.reshape(batch_size * self.qne_k_samples, -1),
+            #     action_low,
+            #     action_high,
+            # )
             self.logger.record(
                 "debug/qne_candidate_actions_mean",
-                th.mean(clipped_k_candidate_actions).item(),
+                th.mean(bounded_k_candidate_actions).item(),
             )
             self.logger.record(
                 "debug/qne_candidate_actions_std",
-                th.std(clipped_k_candidate_actions).item(),
+                th.std(bounded_k_candidate_actions).item(),
             )
 
             # =====================================================================
@@ -327,7 +338,9 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
             # 将 [B, K, Dim] 的形状展平为 [B*K, Dim] 以便输入网络
             q_values_k = self.critic.q1_forward(
                 states_expanded.reshape(batch_size * self.qne_k_samples, -1),
-                clipped_k_candidate_actions,
+                bounded_k_candidate_actions.reshape(
+                    batch_size * self.qne_k_samples, -1
+                ),  # <--- 对动作也进行reshape,
             )
             q_values_k = q_values_k.reshape(
                 batch_size, self.qne_k_samples, 1
@@ -378,6 +391,9 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
             )
 
             target_noise = th.sum(softmax_weights * k_noises, dim=1)  # [B, A_dim]
+            # --- 添加这个新的日志 ---
+            self.logger.record("debug/target_noise_std", th.std(target_noise).item())
+            # --- 添加结束 ---
 
             # (e) Actor进行噪声预测
             predicted_noise = self.actor._epsilon_net(
