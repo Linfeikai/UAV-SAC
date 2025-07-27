@@ -99,7 +99,7 @@ class CustomEnv(gym.Env):
         # 2. 连续部分：角度、速度比例、卸载率
         self.continuous_action_space = spaces.Box(
             low=np.array(
-                [-np.pi, 0, 0], dtype=np.float32
+                [-np.pi, 0, 0.5], dtype=np.float32
             ),  # angle, velocity_ratio, offloading_ratio
             high=np.array([np.pi, 1, 1], dtype=np.float32),
             dtype=np.float32,
