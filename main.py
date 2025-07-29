@@ -35,7 +35,7 @@ from typing import Dict, List, Optional, Tuple
 
 from gymnasium.wrappers import TimeLimit
 import warnings
-import swanlab
+# import swanlab
 
 # swanlab.sync_wandb()
 # # swanlab.sync_tensorboard_torch()
@@ -59,9 +59,9 @@ register(
 )
 # 1. 定义两个不同的初始学习率
 # Actor可以快一点，因为它需要探索。Critic必须稳，所以让它慢得多。
-lr_actor_initial = 3e-5  # 保持原来的值
+lr_actor_initial = 3e-4  # 保持原来的值
 lr_critic_initial = 3e-4  # 升高一个数量级
-lr_final = 1e-5  # 最终学习率
+lr_final = 1e-6  # 最终学习率
 
 
 # 2. 为它们分别创建衰减函数
@@ -236,26 +236,21 @@ class UAVEnvWrapper(gym.Wrapper):
 
     def _decode_action(self, action: np.ndarray) -> Tuple[int, np.ndarray]:
         """
-        解码Agent输出的连续动作向量。
+        解码Agent输出的连续动作向量 (此方法保持不变)。
         """
+        # clamp到[-1, 1]是一个好习惯，防止Agent输出越界
         action = np.clip(action, -1.0, 1.0)
 
         action_th = th.from_numpy(action).to(self.ue_embeddings_th.device)
 
-        # 解码离散部分 (选择UE)
         ue_vector_from_action = action_th[: self.ue_embedding_dim]
-        # self.ue_embeddings_th 的 shape: [num_ues, ue_embedding_dim]
         distances = th.cdist(ue_vector_from_action.unsqueeze(0), self.ue_embeddings_th)
-        # distances 的 shape: [1, num_ues], 找到最小距离的索引
         discrete_action = th.argmin(distances, dim=1).item()
 
-        # 解码连续部分 (飞行参数)
-        # 注意：Agent输出的连续动作在[-1, 1]范围，需要映射回原始范围
         original_continuous_space = self.env.action_space.spaces[1]
         low = original_continuous_space.low
         high = original_continuous_space.high
 
-        # 从[-1, 1]映射回[low, high]
         continuous_action_normalized = action[self.ue_embedding_dim :]
         continuous_action_rescaled = low + (
             0.5 * (continuous_action_normalized + 1.0) * (high - low)
@@ -372,9 +367,9 @@ def run_vanilla_sac(config: dict):
     os.makedirs(save_path, exist_ok=True)  # 确保模型保存目录存在
 
     wandb.init(
-        project="SAC-env-adjust-fairness",  # 项目名称（wandb 仪表盘中显示）
+        project="SAC-env_2.0",  # 项目名称（wandb 仪表盘中显示）
         name=experiment_name,  # 实验名称（可选）
-        notes="temperature=0.05",  # 实验备注（可选）
+        notes="add service counts",  # 实验备注（可选）
         # config={  # 记录超参数（可选）
         #     # "policy": "MlpPolicy",
         #     "total_timesteps": 100000,
@@ -470,7 +465,7 @@ def SAC_hybrid_test():
         callback=metric_callback,  # 显示进度条
         log_interval=10,  # 每10步打印一次日志
     )
-    swanlab.finish()
+    # swanlab.finish()
     import time
 
     # 确保目标文件夹存在
@@ -516,17 +511,18 @@ def run_diffusion_sac(config: dict):
     )
     # 2.初始化wandb
     wandb.init(
-        project="SAC-find_out",  # 项目名称（wandb 仪表盘中显示）
+        project="SAC-env_2.0",  # 项目名称（wandb 仪表盘中显示）
         name=experiment_name,  # 实验名称（可选）
-        notes="entropy_scale=0.5",  # 实验备注（可选）
+        notes="add service counts",  # 实验备注（可选）
         config={  # 记录超参数（可选）
             # "policy": "MlpPolicy",
+            "learning_starts": learning_starts,
             "total_timesteps": total_timesteps,
-            # "qne_k_samples": qne_k_samples,
+            "qne_k_samples": qne_k_samples,
             "T_steps": policy_kwargs["T"],
             "ue_embedding_dim": wrapper_kwargs["ue_embedding_dim"],
             "learning_starts": learning_starts,  # 经验回放开始训练的步数
-            "qne_temperature": 5.0,
+            "qne_temperature": qne_temperature,
             # "fairness_penalty_weight": 10.0,  # 公平性惩罚权重
         },
         sync_tensorboard=True,  # auto-upload sb3's tensorboard metrics
@@ -631,20 +627,20 @@ def get_sweep_config() -> dict:
             "lr_actor": {
                 "distribution": "log_uniform_values",
                 "min": 1e-5,
-                "max": 5e-4,
+                "max": 4e-4,
             },
             "lr_critic": {
                 "distribution": "log_uniform_values",
                 "min": 1e-5,
-                "max": 5e-4,
+                "max": 4e-4,
             },
             # --- 算法核心超参数 ---
             "qne_temperature": {
                 "distribution": "uniform",
                 "min": 0.01,
-                "max": 5.0,
+                "max": 0.5,
             },
-            "learning_starts": {"values": [10000, 25000, 30000]},
+            # "learning_starts": {"values": [10000, 25000, 30000]},
             # --- 扩散模型特定参数 ---
             "T_steps": {
                 "values": [5, 10, 20]  # 扩散步数
@@ -652,9 +648,9 @@ def get_sweep_config() -> dict:
             "qne_k_samples": {
                 "values": [8, 16, 32]  # "头脑风暴"样本数
             },
-            # # --- 网络结构 ---先不考虑吧
-            # "net_arch_actor": {"values": [[256, 256], [512, 512]]},
-            # "net_arch_critic": {"values": [[256, 256], [512, 512]]},
+            # --- 网络结构 ---先不考虑吧
+            "net_arch_actor": {"values": [[256, 256], [512, 512]]},
+            "net_arch_critic": {"values": [[256, 256], [512, 512]]},
         },
         "early_terminate": {  # 提前终止不佳的实验，节省资源
             "type": "hyperband",
@@ -671,7 +667,9 @@ def train_for_sweep():
     """
     # 1. 初始化Wandb run
     # name可以由Wandb自动生成，也可以自定义
-    run = wandb.init(project="SAC-find_out-sweep", reinit=True)
+    run = wandb.init(
+        project="SAC-find_out-sweep", reinit=True, sync_tensorboard=True, save_code=True
+    )
 
     # 2. 从 wandb.config 中提取超参数
     #    这里我们给每个参数提供一个默认值，以防万一
@@ -721,7 +719,7 @@ def train_for_sweep():
         env=env,
         tensorboard_log=log_path,
         verbose=0,  # 在sweep中通常关闭详细日志
-        learning_starts=config.get("learning_starts", 25000),
+        learning_starts=config.get("learning_starts", 10000),
         qne_k_samples=config.get("qne_k_samples", 16),
         qne_temperature=config.get("qne_temperature", 5.0),
         policy_kwargs=policy_kwargs,
