@@ -20,6 +20,7 @@ class UAVNode:
     t_fly = 1  # 飞行时间暂定1s
     r = 10 ** (-27)  # 芯片结构对cpu处理的影响因子
     max_speed = 20  # 无人机最大飞行速度 30m/s
+    max_acceleration = 5 # 无人机最大加速度
 
     # --- 移除 __init__，因为 dataclass 会自动处理 flying_speed 的初始化 ---
     flying_speed: float = 20.0

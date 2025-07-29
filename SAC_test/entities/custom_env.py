@@ -49,6 +49,7 @@ class CustomEnv(gym.Env):
         PENALTY_TASK_FAILURE = -2.0  # 任务失败的惩罚
         PENALTY_OUT_OF_BOUNDS = -2.0
         PENALTY_STATIC = -1.0
+        PENALTY_VELOCITY_SMOOTH = -0.5
 
         # 归一化分母 (通过运行基准得到)
         NORM_DELAY = 80.0  # 经验最大总延迟
@@ -69,7 +70,7 @@ class CustomEnv(gym.Env):
     ue_num = 20  # UE设备的数量：20
     s = 1000  # 单位bit处理所需cpu圈数1000
 
-    state_dim = 86  # 状态空间维度 # 距离border，距离充电器，dx,dy,speed,电量+80=86
+    state_dim = 106  # 状态空间维度 # 距离border，距离充电器，dx,dy,speed,电量+80=86 +20个历史service_count = 106
     action_dim = 4
     max_action = (-1, 1)
 
@@ -99,7 +100,7 @@ class CustomEnv(gym.Env):
         # 2. 连续部分：角度、速度比例、卸载率
         self.continuous_action_space = spaces.Box(
             low=np.array(
-                [-np.pi, 0, 0.5], dtype=np.float32
+                [-np.pi, -1, 0.5], dtype=np.float32
             ),  # angle, velocity_ratio, offloading_ratio
             high=np.array([np.pi, 1, 1], dtype=np.float32),
             dtype=np.float32,
@@ -111,7 +112,7 @@ class CustomEnv(gym.Env):
         )
 
         self.observation_space = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(86,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(self.state_dim,), dtype=np.float32
         )
 
         self.nodeList: List[UENode] = []
@@ -161,6 +162,7 @@ class CustomEnv(gym.Env):
         self.current_time = 0.0  # 当前时间
 
         self.previous_fairness_index = 1.0  # 初始化公平性指数
+        self.last_velocity = 0  # 记录上一步的action 这是为了能够速度平滑
 
         # # =====================================================================
         # # [临时调试代码] 用于跟踪整个运行期间遇到的最大值
@@ -278,7 +280,11 @@ class CustomEnv(gym.Env):
         """处理无人机飞行，返回飞行结果和相关惩罚。
         飞行能耗（我们希望最小化）；飞行奖励（靠近ue的奖励）；越界惩罚；静止惩罚；悬停时间。
         """
-        dis_fly = self.uav.max_speed * velocity_ratio * self.t_fly
+        # 729修改：把速度比率重定义为减速，定速，油门，
+        delta_v = self.uav.max_acceleration * velocity_ratio * self.t_fly
+        new_velocity = self.uav.flying_speed + delta_v
+        new_velocity = np.clip(new_velocity, 0, self.uav.max_speed)
+        dis_fly = new_velocity * self.t_fly
         new_x = self.uav.loc[0] + dis_fly * math.cos(angle)
         new_y = self.uav.loc[1] + dis_fly * math.sin(angle)
 
@@ -304,7 +310,7 @@ class CustomEnv(gym.Env):
         flying_energy, flying_reward = self.uav.moveto(
             dis_fly, angle, self.nodeList[ue_id].loc
         )
-        self.uav.flying_speed = dis_fly
+        self.uav.flying_speed = new_velocity
 
         if self.flying_trajectory is not None:
             self.flying_trajectory.append(self.uav.loc.copy())
@@ -404,6 +410,7 @@ class CustomEnv(gym.Env):
         flight_info: dict,
         delay_info: dict,
         fairness_improvement: float,
+        current_velocity: float,
     ) -> float:
         """根据所有组件计算最终的奖励值。"""
         # 创建一个字典来存放所有奖励组件
@@ -475,18 +482,22 @@ class CustomEnv(gym.Env):
             failure_ratio = num_failures / (self.ue_num - 1)
             # 用失败率来缩放基础惩罚值
             local_failure_penalty = failure_ratio * self.Config.PENALTY_TASK_FAILURE
-
+        velocity_penalty = self.Config.PENALTY_VELOCITY_SMOOTH * np.sum(
+            (current_velocity - self.last_velocity) ** 2
+        )
         reward = reward + (
             served_ue_penalty
             + local_failure_penalty
             + out_of_border_penalty
             + static_penalty
+            + velocity_penalty
         )
         # 将它们也存入字典以供观察
         reward_components["served_ue_penalty"] = served_ue_penalty
         reward_components["local_failure_penalty"] = local_failure_penalty
         reward_components["out_of_border_penalty"] = out_of_border_penalty
         reward_components["static_penalty"] = static_penalty
+        reward_components["velocity_smooth"] = velocity_penalty
 
         # # no_Task_penalty 没有加入，是因为当前env设置下所有node会重新生成任务。
         # reward = (
@@ -598,7 +609,7 @@ class CustomEnv(gym.Env):
 
         # 8. 计算最终奖励 (在检查终止条件之前)
         reward, reward_components = self._compute_reward(
-            flight_info, delay_info, fairness_improvement
+            flight_info, delay_info, fairness_improvement, velocity_ratio
         )
 
         # 9. 检查回合是否终止 (在生成新任务之前)
@@ -680,8 +691,10 @@ class CustomEnv(gym.Env):
             (relative_locs, cache_ratios, capacity_ratios)
         ).flatten()
         state.extend(ue_states)
+        # 5.把服务信息进行归一化，也列入到状态中service_counts
+        state.extend(self.service_counts / self.slot_num)
 
-        assert len(state) == 86, f"State length mismatch: {len(state)}"
+        assert len(state) == self.state_dim, f"State length mismatch: {len(state)}"
         return np.array(state, dtype=np.float32)
 
     def reset(self, seed=None, options=None):
@@ -689,6 +702,7 @@ class CustomEnv(gym.Env):
         self.uav.reset()  # 重置无人机状态
         self.service_counts.fill(0)  # 重置服务计数
         self.previous_fairness_index = 1.0  # 确保每次新回合开始时，都重置公平性历史
+        self.last_velocity = 0
 
         # --- MODIFICATION: Conditionally reset and record history ---
         if self.render_mode == "human":
@@ -926,9 +940,6 @@ class CustomEnv(gym.Env):
                 "charge": [
                     d.get("charge_reward", 0) for d in self.reward_components_history
                 ],
-                "pbrs": [
-                    d.get("pbrs_reward", 0) for d in self.reward_components_history
-                ],
             }
             penalties = {
                 "delay": [
@@ -945,19 +956,51 @@ class CustomEnv(gym.Env):
                     d.get("static_penalty", 0) for d in self.reward_components_history
                 ],
                 "task_fail": [
-                    d.get("served_ue_task_penalty", 0)
-                    + d.get("local_failure_penalty", 0)
-                    for d in self.reward_components_history
-                ],
-                "fairness": [
-                    d.get("fairness_improvement", 0)
+                    d.get("served_ue_penalty", 0) + d.get("local_failure_penalty", 0)
                     for d in self.reward_components_history
                 ],
                 "low_battery": [
                     d.get("low_battery_penalty", 0)
                     for d in self.reward_components_history
                 ],
+                "velovity_smooth": [
+                    d.get("velocity_smooth", 0) for d in self.reward_components_history
+                ],
             }
+            # --- 第2步：动态分离 pbrs_reward 和 fairness_improvement ---
+            # 为每个正负不定的参数准备正、负两个列表
+            pbrs_pos = []
+            pbrs_neg = []
+            fairness_pos = []
+            fairness_neg = []
+            # 遍历一次历史记录，同时处理所有正负不定的参数
+            for d in self.reward_components_history:
+                # 处理 pbrs_reward
+                pbrs_value = d.get("pbrs_reward", 0)
+                if pbrs_value > 0:
+                    pbrs_pos.append(pbrs_value)
+                    pbrs_neg.append(0)
+                else:
+                    pbrs_pos.append(0)
+                    pbrs_neg.append(pbrs_value)
+
+                # 处理 fairness_improvement
+                fairness_value = d.get("fairness_improvement", 0)
+                if fairness_value > 0:
+                    fairness_pos.append(fairness_value)
+                    fairness_neg.append(0)
+                else:
+                    fairness_pos.append(0)
+                    fairness_neg.append(fairness_value)
+                # --- 第3步：将分离后的数据添加回主字典 ---
+
+            # 将正值部分添加到 rewards 字典
+            rewards["pbrs (pos)"] = pbrs_pos
+            rewards["fairness (pos)"] = fairness_pos
+
+            # 将负值部分添加到 penalties 字典
+            penalties["pbrs (neg)"] = pbrs_neg
+            penalties["fairness (neg)"] = fairness_neg
 
             # 绘制正奖励
             bottom_pos = np.zeros(len(steps))
@@ -1054,7 +1097,11 @@ class CustomEnv(gym.Env):
         print(f"  - Final Battery: {self.uav.e_battery:.2f} J")
         print("=" * 50 + "\n")
 
+        import time
+
+        current_time = int(time.time())
         plt.show(block=True)
+        plt.savefig(f"{current_time}_img")
         plt.close(fig)
 
     def find_other_nodes(self, ue_node):
@@ -1131,6 +1178,9 @@ class CustomEnv(gym.Env):
 
     def calculate_fairness(self):
         """计算当前时刻的Jain公平性指数"""
+        if np.sum(self.service_counts) == 0:
+            return 0.0  # 或者 1.0/self.ue_num
+
         service_counts = np.array(self.service_counts) + 1e-6  # 避免除零
         numerator = np.sum(service_counts) ** 2
         denominator = self.ue_num * np.sum(service_counts**2)
