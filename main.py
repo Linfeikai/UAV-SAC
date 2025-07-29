@@ -1,4 +1,4 @@
-from SAC_test.entities.custom_env import CustomEnv
+# from SAC_test.entities.custom_env import CustomEnv
 
 # from custom_components.hybrid_sac_agent import HybridSAC
 from diffusion_sac.diffusion_sac_agent import DiffusionSACAgent
@@ -513,7 +513,7 @@ def run_diffusion_sac(config: dict):
     wandb.init(
         project="SAC-env_2.0",  # 项目名称（wandb 仪表盘中显示）
         name=experiment_name,  # 实验名称（可选）
-        notes="add service counts",  # 实验备注（可选）
+        notes="gpt:scale/unscale;qne:double q;grad_norm sitck to 5;ent=0",  # 实验备注（可选）
         config={  # 记录超参数（可选）
             # "policy": "MlpPolicy",
             "learning_starts": learning_starts,

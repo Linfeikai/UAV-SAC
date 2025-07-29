@@ -68,7 +68,7 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
         qne_k_samples: int = 32,  # QNE中的K值，即"头脑风暴"的样本数
         policy_kwargs: Optional[Dict[str, Any]] = None,
         qne_temperature: float = 5.0,  # QNE的温度参数，用于控制Softmax的平滑度
-        max_grad_norm: float = 1.0,  # <-- 确保有这个参数
+        max_grad_norm: float = 5.0,  # <-- 确保有这个参数
         # --- 其他标准参数 ---
         tensorboard_log: Optional[str] = None,
         verbose: int = 0,
@@ -147,6 +147,17 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
         self.actor = self.policy.actor
         self.critic = self.policy.critic
         self.critic_target = self.policy.critic_target
+
+    # === NEW: 显式的动作缩放/反缩放，确保策略空间([-1,1])与环境空间一致 ===
+    def _to_policy_space(self, env_actions: th.Tensor) -> th.Tensor:
+        low = th.as_tensor(self.action_space.low, device=self.device)
+        high = th.as_tensor(self.action_space.high, device=self.device)
+        return 2.0 * (env_actions - low) / (high - low) - 1.0
+
+    def _to_env_space(self, policy_actions: th.Tensor) -> th.Tensor:
+        low = th.as_tensor(self.action_space.low, device=self.device)
+        high = th.as_tensor(self.action_space.high, device=self.device)
+        return (policy_actions + 1.0) * 0.5 * (high - low) + low
 
     def train(self, gradient_steps: int, batch_size: int = 256) -> None:
         """
@@ -278,9 +289,11 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
             # 和对应的状态`s` (即 `replay_data.observations`)
             EPS = 1e-6
 
-            clean_actions_from_buffer = replay_data.actions.clamp(-1.0 + EPS, 1.0 - EPS)
-
-            unbounded_clean_actions = th.atanh(clean_actions_from_buffer)
+            policy_actions_from_buffer = self._to_policy_space(replay_data.actions)
+            policy_actions_from_buffer = policy_actions_from_buffer.clamp(
+                -1.0 + EPS, 1.0 - EPS
+            )
+            unbounded_clean_actions = th.atanh(policy_actions_from_buffer)
 
             # clean_actions_from_buffer = replay_data.actions
             states_from_buffer = replay_data.observations
@@ -332,8 +345,8 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
             states_expanded = states_from_buffer.unsqueeze(1).expand(
                 -1, self.qne_k_samples, -1
             )  # [B, 1, S_dim] -> [B, K, S_dim]
-            bounded_k_candidate_actions = th.tanh(k_candidate_actions)
-
+            policy_k_candidate_actions = th.tanh(k_candidate_actions)
+            env_k_candidate_actions = self._to_env_space(policy_k_candidate_actions)
             # ======================= 在这里加入关键的修正代码 =======================
             # 在送入Critic之前，将所有候选动作裁剪到有效范围 [-1, 1]
             # action_space.low 和 high 通常是 -1 和 1，这里用它们来确保通用性
@@ -346,25 +359,25 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
             # )
             self.logger.record(
                 "debug/qne_candidate_actions_mean",
-                th.mean(bounded_k_candidate_actions).item(),
+                th.mean(env_k_candidate_actions).item(),
             )
             self.logger.record(
                 "debug/qne_candidate_actions_std",
-                th.std(bounded_k_candidate_actions).item(),
+                th.std(env_k_candidate_actions).item(),
             )
 
             # =====================================================================
 
-            # 将 [B, K, Dim] 的形状展平为 [B*K, Dim] 以便输入网络
-            q_values_k = self.critic.q1_forward(
-                states_expanded.reshape(batch_size * self.qne_k_samples, -1),
-                bounded_k_candidate_actions.reshape(
-                    batch_size * self.qne_k_samples, -1
-                ),  # <--- 对动作也进行reshape,
+            # CHANGED: 用双Q并取最小，保持与SAC一致的保守性
+            states_reshaped = states_expanded.reshape(
+                batch_size * self.qne_k_samples, -1
             )
-            q_values_k = q_values_k.reshape(
-                batch_size, self.qne_k_samples, 1
-            )  # [B*K, 1] -> [B, K, 1]
+            acts_reshaped = env_k_candidate_actions.reshape(
+                batch_size * self.qne_k_samples, -1
+            )
+            q1 = self.critic.q1_forward(states_reshaped, acts_reshaped)
+            q2 = self.critic.q2_forward(states_reshaped, acts_reshaped)
+            q_values_k = th.min(q1, q2).reshape(batch_size, self.qne_k_samples, 1)
             with th.no_grad():  # 在no_grad环境下计算，以防影响梯度
                 # 计算这 K*B 个Q值的均值和标准差
                 q_values_k_mean = th.mean(q_values_k).item()
