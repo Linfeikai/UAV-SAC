@@ -99,6 +99,16 @@ class ContinuousCritic(BaseModel):
         qvalue_input = torch.cat([features, action], dim=1)
         return self.q_networks[0](qvalue_input)
 
+    def q2_forward(self, obs: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+        """
+        一个辅助函数，只使用第一个Critic网络进行预测。
+        这在计算Actor loss时可能会用到。
+        """
+        # 同样，输入是单一的动作张量
+        features = self.extract_features(obs, self.features_extractor)
+        qvalue_input = torch.cat([features, action], dim=1)
+        return self.q_networks[1](qvalue_input)
+
     def _get_constructor_parameters(self) -> dict:
         """
         返回创建此Critic所需的参数，用于模型保存和加载。
