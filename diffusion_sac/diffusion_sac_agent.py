@@ -68,6 +68,7 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
         qne_k_samples: int = 32,  # QNE中的K值，即"头脑风暴"的样本数
         policy_kwargs: Optional[Dict[str, Any]] = None,
         qne_temperature: float = 5.0,  # QNE的温度参数，用于控制Softmax的平滑度
+        max_grad_norm: float = 1.0,  # <-- 确保有这个参数
         # --- 其他标准参数 ---
         tensorboard_log: Optional[str] = None,
         verbose: int = 0,
@@ -107,7 +108,8 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
         self.target_update_interval = target_update_interval
         self.ent_coef_optimizer: Optional[th.optim.Adam] = None
         self.qne_temperature = qne_temperature
-
+        self.max_grad_norm = max_grad_norm
+        self.critic_updates_per_step = 4
         if _init_setup_model:
             self._setup_model()
 
@@ -189,66 +191,84 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
                 # 如果是固定值模式，直接使用预先创建的张量
                 ent_coef_tensor = self.ent_coef_tensor
 
-            # 2. --- Critic Loss 计算 (与标准SAC非常相似) ---
-            with th.no_grad():
-                # 使用 Actor 生成下一状态的动作及其对数概率
-                next_actions, next_log_prob = self.actor.action_log_prob(
-                    replay_data.next_observations
-                )
-                # next_actions = self.actor.forward(
-                # #     replay_data.next_observations, deterministic=True
-                # # )
-                # # next_log_prob = th.zeros(next_actions.shape[0], 1, device=self.device)
+            for _ in range(self.critic_updates_per_step):
+                # 2. --- Critic Loss 计算 (与标准SAC非常相似) ---
+                with th.no_grad():
+                    # 使用 Actor 生成下一状态的动作及其对数概率
+                    next_actions, next_log_prob = self.actor.action_log_prob(
+                        replay_data.next_observations
+                    )
+                    # next_actions = self.actor.forward(
+                    # #     replay_data.next_observations, deterministic=True
+                    # # )
+                    # # next_log_prob = th.zeros(next_actions.shape[0], 1, device=self.device)
 
-                # 在这里，我们需要插入第一个诊断点，检查Actor的输出是否合理
-                # 【上一轮建议的“行动一”】
-                self.logger.record(
-                    "debug/next_actions_mean", th.mean(next_actions).item()
-                )
-                self.logger.record(
-                    "debug/next_actions_std", th.std(next_actions).item()
-                )
-                self.logger.record(
-                    "debug/next_log_prob_mean", th.mean(next_log_prob).item()
+                    # 在这里，我们需要插入第一个诊断点，检查Actor的输出是否合理
+                    # 【上一轮建议的“行动一”】
+                    self.logger.record(
+                        "debug/next_actions_mean", th.mean(next_actions).item()
+                    )
+                    self.logger.record(
+                        "debug/next_actions_std", th.std(next_actions).item()
+                    )
+                    self.logger.record(
+                        "debug/next_log_prob_mean", th.mean(next_log_prob).item()
+                    )
+
+                    # 用目标Critic网络评估下一状态-动作对的Q值
+                    qf_next_target = th.cat(
+                        self.critic_target(replay_data.next_observations, next_actions),
+                        dim=1,
+                    )
+                    min_qf_next_target, _ = th.min(qf_next_target, dim=1, keepdim=True)
+
+                    # 在这里，可以诊断目标Q网络给出的分数
+                    self.logger.record(
+                        "debug/qf_next_target_mean", th.mean(min_qf_next_target).item()
+                    )
+
+                    # 加上熵项，计算最终的目标Q值
+                    min_qf_next_target -= ent_coef_tensor * next_log_prob
+                    entropy_bonus = ent_coef_tensor * next_log_prob
+                    self.logger.record(
+                        "debug/entropy_bonus_mean", th.mean(entropy_bonus).item()
+                    )
+
+                    next_q_value = (
+                        replay_data.rewards
+                        + (1 - replay_data.dones) * self.gamma * min_qf_next_target
+                    )
+                    self.logger.record(
+                        "debug/target_q_value_mean", th.mean(next_q_value).item()
+                    )
+
+                # 计算当前Critic的Q值
+                qf_values = self.critic(replay_data.observations, replay_data.actions)
+                # 计算Critic的MSE损失
+                critic_loss = 0.5 * sum(F.mse_loss(q, next_q_value) for q in qf_values)
+                critic_losses.append(critic_loss.item())
+
+                # 优化Critic
+                self.critic.optimizer.zero_grad()
+                critic_loss.backward()
+                # 3. 【新增】监控Critic的原始梯度范数
+                #    在裁剪之前进行监控，以了解梯度的原始大小
+                critic_grad_norm = 0.0
+                for p in self.critic.parameters():
+                    if p.grad is not None:
+                        # 计算每个参数梯度的L2范数，然后累加其平方
+                        param_norm = p.grad.data.norm(2)
+                        critic_grad_norm += param_norm.item() ** 2
+                # 最后开方得到总的梯度范数
+                critic_grad_norm = critic_grad_norm**0.5
+                self.logger.record("train/critic_grad_norm_raw", critic_grad_norm)
+
+                # 4. 【新增】对Critic的梯度进行裁剪 (这是“安全带”)
+                th.nn.utils.clip_grad_norm_(
+                    self.critic.parameters(), self.max_grad_norm
                 )
 
-                # 用目标Critic网络评估下一状态-动作对的Q值
-                qf_next_target = th.cat(
-                    self.critic_target(replay_data.next_observations, next_actions),
-                    dim=1,
-                )
-                min_qf_next_target, _ = th.min(qf_next_target, dim=1, keepdim=True)
-
-                # 在这里，可以诊断目标Q网络给出的分数
-                self.logger.record(
-                    "debug/qf_next_target_mean", th.mean(min_qf_next_target).item()
-                )
-
-                # 加上熵项，计算最终的目标Q值
-                min_qf_next_target -= ent_coef_tensor * next_log_prob
-                entropy_bonus = ent_coef_tensor * next_log_prob
-                self.logger.record(
-                    "debug/entropy_bonus_mean", th.mean(entropy_bonus).item()
-                )
-
-                next_q_value = (
-                    replay_data.rewards
-                    + (1 - replay_data.dones) * self.gamma * min_qf_next_target
-                )
-                self.logger.record(
-                    "debug/target_q_value_mean", th.mean(next_q_value).item()
-                )
-
-            # 计算当前Critic的Q值
-            qf_values = self.critic(replay_data.observations, replay_data.actions)
-            # 计算Critic的MSE损失
-            critic_loss = 0.5 * sum(F.mse_loss(q, next_q_value) for q in qf_values)
-            critic_losses.append(critic_loss.item())
-
-            # 优化Critic
-            self.critic.optimizer.zero_grad()
-            critic_loss.backward()
-            self.critic.optimizer.step()
+                self.critic.optimizer.step()
 
             # --- 3. Actor Loss 计算 (QNE核心逻辑) ---
             # 这里的逻辑完全取代了原始SAC的Actor Loss
@@ -409,6 +429,18 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
             # --- 4. 优化Actor ---
             self.actor.optimizer.zero_grad()
             actor_loss.backward()
+            # 3. 【新增】监控Actor的原始梯度范数
+            actor_grad_norm = 0.0
+            for p in self.actor.parameters():
+                if p.grad is not None:
+                    param_norm = p.grad.data.norm(2)
+                    actor_grad_norm += param_norm.item() ** 2
+            actor_grad_norm = actor_grad_norm**0.5
+            self.logger.record("train/actor_grad_norm_raw", actor_grad_norm)
+
+            # 4. 【新增】对Actor的梯度进行裁剪
+            th.nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+
             self.actor.optimizer.step()
 
             # --- 5. 熵系数(alpha)更新 (这部分逻辑可以保留，以稳定训练) ---
