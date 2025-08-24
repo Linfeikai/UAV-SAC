@@ -1,14 +1,14 @@
 # =====================================================================================
-# 文件名: diffusion_policy_actor.py (原 hybrid_actor.py)
-# 描述: 实现了基于扩散模型的Actor，用于在SAC等算法中学习多模态策略。
-#       该Actor将取代原有的、基于高斯分布和分离头的HybridActor。
+# 文件名: diffusion_policy_actor.py (已修改)
+# 描述: 实现了基于扩散模型的Actor。
+#       新增了 approximate_log_prob 方法，用于精确计算 log π(a|s)。
 # =====================================================================================
 
 import torch
 import torch.nn as nn
 import math
 from gymnasium import spaces
-from typing import Tuple, Dict, Any, List
+from typing import Tuple, Dict, Any, List, Optional
 
 # 从SB3导入必要的基类和类型提示
 from stable_baselines3.common.policies import BasePolicy
@@ -23,29 +23,24 @@ from stable_baselines3.common.type_aliases import PyTorchObs
 def _precompute_diffusion_schedule(
     T_steps: int, beta_start: float = 0.0001, beta_end: float = 0.02
 ) -> Dict[str, torch.Tensor]:
-    """
-    预先计算扩散过程所需的常量系数 (betas, alphas, ...)，避免在训练中重复计算。
-    """
     betas = torch.linspace(beta_start, beta_end, T_steps, dtype=torch.float32)
-    alphas = 1.0 - betas
-    alphas_cumprod = torch.cumprod(alphas, dim=0)  # alpha_bar
-    alphas_cumprod_prev = torch.cat(
-        [torch.tensor([1.0]), alphas_cumprod[:-1]], dim=0
-    )  # alpha_bar_{t-1}
+    alphas = 1.0 - betas  # <--- 保留原始 alpha_t
+    alphas_cumprod = torch.cumprod(alphas, dim=0)  # \bar{alpha}_t
+    alphas_cumprod_prev = torch.cat([torch.tensor([1.0]), alphas_cumprod[:-1]], dim=0)
 
-    # 计算用于前向加噪过程的系数: sqrt(alpha_bar_t) * x_0 + sqrt(1 - alpha_bar_t) * noise
     sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod)
     sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - alphas_cumprod)
 
-    # 计算用于反向去噪过程的系数
     posterior_variance = betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod)
 
     return {
         "betas": betas,
+        "alphas": alphas,  # <--- 新增
         "alphas_cumprod": alphas_cumprod,
         "sqrt_alphas_cumprod": sqrt_alphas_cumprod,
         "sqrt_one_minus_alphas_cumprod": sqrt_one_minus_alphas_cumprod,
         "posterior_variance": posterior_variance,
+        "alphas_cumprod_prev": alphas_cumprod_prev,
     }
 
 
@@ -93,23 +88,23 @@ class _EpsilonNet(nn.Module):
         self.time_encoder = _SinusoidalTimestepEmbedding(time_embedding_dim)
         self.time_mlp = nn.Sequential(
             nn.Linear(time_embedding_dim, hidden_dim),
-            nn.ReLU(),
+            nn.Mish(),
             nn.Linear(hidden_dim, hidden_dim),
         )
 
         # 状态和动作的编码器
-        self.state_encoder = nn.Sequential(nn.Linear(state_dim, hidden_dim), nn.ReLU())
+        self.state_encoder = nn.Sequential(nn.Linear(state_dim, hidden_dim), nn.Mish())
         self.action_encoder = nn.Sequential(
-            nn.Linear(action_dim, hidden_dim), nn.ReLU()
+            nn.Linear(action_dim, hidden_dim), nn.Mish()
         )
 
         # 融合信息的主干网络
         combined_dim = hidden_dim + hidden_dim + hidden_dim
         self.backbone = nn.Sequential(
             nn.Linear(combined_dim, hidden_dim),
-            nn.ReLU(),
+            nn.Mish(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
+            nn.Mish(),
         )
 
         # 输出层
@@ -150,200 +145,257 @@ class DiffusionPolicyActor(BasePolicy):
         features_extractor: BaseFeaturesExtractor,
         features_dim: int,
         # 扩散模型特定超参数
-        T_steps: int = 50,  # 扩散总步数
-        log_prob_monte_carlo_samples: int = 10,  # 计算log_prob时的蒙特卡洛采样数
+        T_steps: int = 20,  # 扩散总步数 T_total
+        log_prob_n_steps: int = 20,  # 数值积分步数 T_log_prob
+        log_prob_n_samples: int = 50,  # 蒙特卡洛采样数 N
         normalize_images: bool = True,
-        entropy_scale: float = 0.5,  # 默认值为 1.0，保持原样
-        **kwargs,  # 忽略其他来自Policy的参数
+        entropy_scale: float = 1.0,  # 用于熵代理的缩放系数
+        t_min: float = 1e-3,  # 积分区间的下界
+        t_max: float = 1.0 - 1e-3,  # 积分区间的上界
+        **kwargs,
     ):
         super().__init__(
             observation_space=observation_space,
             action_space=action_space,
             features_extractor=features_extractor,
             normalize_images=normalize_images,
-            # squash_output 对扩散模型不直接适用，因为输出范围由数据本身决定
         )
 
-        # 验证动作空间是否为我们期望的 Box 类型
         if not isinstance(action_space, spaces.Box):
             raise ValueError("DiffusionPolicyActor 要求动作空间为 spaces.Box。")
 
         self.action_dim = action_space.shape[0]
         self.features_dim = features_dim
         self.T = T_steps
-        self.N_log_prob = log_prob_monte_carlo_samples
+        self.T_log_prob = log_prob_n_steps
+        self.N_log_prob = log_prob_n_samples
         self.entropy_scale = entropy_scale
+        self.t_min = t_min
+        self.t_max = t_max
 
-        # --- 实例化核心组件 ---
-        # 1. 噪声预测网络 EpsilonNet
-        hidden_dim = net_arch[0] if net_arch else 256  # 使用 net_arch 定义隐藏层维度
+        hidden_dim = net_arch[0] if net_arch else 256
         self._epsilon_net = _EpsilonNet(
             state_dim=self.features_dim,
             action_dim=self.action_dim,
             hidden_dim=hidden_dim,
         )
 
-        # 2. 预计算扩散调度系数
         diffusion_schedule = _precompute_diffusion_schedule(self.T)
-        # 将这些系数注册为 buffer，以便能随模型移动 (例如 to(device))
-        # "我们先预先计算出扩散模型需要的所有数学常量，然后通过register_buffer方法，将这些常量作为模型的一部分固定下来。
-        # 这样做既能保证它们不被优化器错误地训练，又能让它们随着模型自动在CPU和GPU之间切换，还能在保存和加载模型时保持一致。"
         for key, value in diffusion_schedule.items():
             self.register_buffer(key, value)
 
     def _get_constructor_parameters(self) -> Dict[str, Any]:
-        # 返回创建此Actor所需的参数
-        return dict(
-            observation_space=self.observation_space,
-            action_space=self.action_space,
-            net_arch=[self._epsilon_net.backbone[0].in_features // 3],  # 示例
-            features_extractor=self.features_extractor,
-            features_dim=self.features_dim,
+        data = super()._get_constructor_parameters()
+        data.update(
+            net_arch=[self._epsilon_net.backbone[0].in_features // 3],
             T_steps=self.T,
-            log_prob_monte_carlo_samples=self.N_log_prob,
+            log_prob_n_steps=self.T_log_prob,
+            log_prob_n_samples=self.N_log_prob,
+            entropy_scale=self.entropy_scale,
+            t_min=self.t_min,
+            t_max=self.t_max,
         )
+        return data
 
-    def forward(self, obs: PyTorchObs, deterministic: bool = False) -> torch.Tensor:
+    def _sample_from_noise(
+        self, features: torch.Tensor, deterministic: bool = False
+    ) -> torch.Tensor:
         """
-        生成动作的核心逻辑，即反向扩散(采样)过程。
+        一个辅助函数，执行完整的去噪过程并返回最终的无界动作。
         """
-        # 1. 提取状态特征
-        features = self.extract_features(obs, self.features_extractor)
         batch_size = features.shape[0]
-
-        # 2. 从纯噪声开始
         action_t = torch.randn((batch_size, self.action_dim), device=self.device)
 
-        # 3. 从 T 到 1 循环去噪
+        # DDPM的反向采样过程
+        # --- 关键修复：_sample_from_noise() 的反向步 ---
         for t_step in reversed(range(1, self.T + 1)):
             t = torch.full(
-                (batch_size, 1), t_step, device=self.device, dtype=torch.long
+                (batch_size,), t_step - 1, device=self.device, dtype=torch.long
             )
 
-            # 预测噪声
-            predicted_noise = self._epsilon_net(features, action_t, t)
+            predicted_noise = self._epsilon_net(features, action_t, t.unsqueeze(1))
 
-            # 计算去噪一步后的动作 a_{t-1}
-            alpha_t = self.alphas_cumprod.gather(0, t.squeeze(-1) - 1).reshape(-1, 1)
+            # 取出本步所需的标量（按 batch 广播）
+            alpha_bar_t = self.alphas_cumprod.gather(0, t)  # \bar{alpha}_t
+            alpha_bar_prev = self.alphas_cumprod_prev.gather(0, t)  # \bar{alpha}_{t-1}
+            alpha_t = self.alphas.gather(0, t)  # \alpha_t
+            beta_t = self.betas.gather(0, t)  # \beta_t
 
-            beta_t = self.betas.gather(0, t.squeeze(-1) - 1).reshape(-1, 1)
+            # 先用 \bar{alpha}_t 还原 x0（这是正确做法）
+            pred_x0 = (
+                action_t - torch.sqrt(1.0 - alpha_bar_t).view(-1, 1) * predicted_noise
+            ) / torch.sqrt(alpha_bar_t).view(-1, 1)
+            pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
 
-            # 使用 DDPM 论文中的去噪公式
-            # DDPM指的是：<Denoising Diffusion Probabilistic Models>
-            term1 = 1.0 / torch.sqrt(1.0 - beta_t)
-            term2 = action_t - (beta_t / torch.sqrt(1 - alpha_t)) * predicted_noise
-            action_t_minus_1 = term1 * term2
+            # 正确的 posterior mean 系数
+            denom = (1.0 - alpha_bar_t).view(-1, 1)
+            coef_x0 = (
+                beta_t.view(-1, 1) * torch.sqrt(alpha_bar_prev).view(-1, 1)
+            ) / denom
+            coef_xt = (
+                torch.sqrt(alpha_t).view(-1, 1) * (1.0 - alpha_bar_prev).view(-1, 1)
+            ) / denom
 
-            # 如果不是最后一步，并且非确定性模式，则加回一些随机性
+            posterior_mean = coef_x0 * pred_x0 + coef_xt * action_t
+
             if t_step > 1 and not deterministic:
-                variance = self.posterior_variance.gather(0, t.squeeze(-1) - 1).reshape(
-                    -1, 1
+                posterior_variance = self.posterior_variance.gather(0, t)
+                noise = torch.randn_like(action_t)
+                action_t = (
+                    posterior_mean + torch.sqrt(posterior_variance).view(-1, 1) * noise
                 )
-                action_t_minus_1 += torch.sqrt(variance) * torch.randn_like(action_t)
+            else:
+                action_t = posterior_mean
 
-            action_t = action_t_minus_1
+        # 返回最终的无界动作(这里是[-1,1]的)
+        return torch.atanh(action_t.clamp(-1 + 1e-6, 1 - 1e-6))
 
-        # 4. 返回最终的干净动作
-        return torch.tanh(action_t)  # <-- 关键修正！
-
-    # def action_log_prob(self, obs: PyTorchObs) -> Tuple[torch.Tensor, torch.Tensor]:
-    #     """
-    #     这个方法在SAC中用于计算Actor Loss。
-    #     对于扩散模型，Actor Loss的计算方式完全不同 (使用QNE)。
-    #     因此，这个方法主要在训练Critic时，提供下一个动作的log_prob。
-    #     """
-    #     # 1. 提取状态特征
-    #     features = self.extract_features(obs, self.features_extractor)
-
-    #     # 2. 生成一个动作样本 (与 forward 逻辑相同)
-    #     # 注意：这里生成的动作是用于计算 Critic loss 的下一个动作 (next_action)
-    #     sampled_action = self.forward(obs, deterministic=False)
-
-    #     # 3. 计算这个生成动作的对数概率 (使用数值积分)
-    #     # 这是一个计算密集型操作
-    #     batch_size = features.shape[0]
-
-    #     # 准备一个变量来累积所有时间步的误差项
-    #     total_mse_terms = torch.zeros(batch_size, 1, device=self.device)
-
-    #     # 在所有时间步上进行近似积分
-    #     for t_step in range(1, self.T + 1):
-    #         t = torch.full(
-    #             (batch_size, 1), t_step, device=self.device, dtype=torch.long
-    #         )
-
-    #         # 蒙特卡洛采样来估计期望误差
-    #         mse_at_t = 0
-    #         for _ in range(self.N_log_prob):
-    #             epsilon = torch.randn_like(sampled_action)
-
-    #             # 加噪
-    #             sqrt_alpha_bar = self.sqrt_alphas_cumprod.gather(
-    #                 0, t.squeeze(-1) - 1
-    #             ).reshape(-1, 1)
-    #             sqrt_one_minus_alpha_bar = self.sqrt_one_minus_alphas_cumprod.gather(
-    #                 0, t.squeeze(-1) - 1
-    #             ).reshape(-1, 1)
-    #             noisy_action = (
-    #                 sqrt_alpha_bar * sampled_action + sqrt_one_minus_alpha_bar * epsilon
-    #             )
-
-    #             # 预测噪声并计算误差
-    #             predicted_noise = self._epsilon_net(features, noisy_action, t)
-    #             mse_at_t += torch.sum(
-    #                 (epsilon - predicted_noise) ** 2, dim=-1, keepdim=True
-    #             )
-
-    #         average_mse_at_t = mse_at_t / self.N_log_prob
-
-    #         # 根据论文公式累加项 (这是一个简化的表达，精确公式更复杂)
-    #         # 这里的权重依赖于 alpha 和 beta
-    #         weight = (self.betas[t_step - 1] ** 2) / (
-    #             2
-    #             * (1.0 - self.alphas_cumprod[t_step - 1])
-    #             * (1.0 - self.betas[t_step - 1])
-    #         )
-    #         total_mse_terms += weight * average_mse_at_t
-
-    #     # 最终的log_prob是这些项的负和，加上一个常数
-    #     # 注意: 精确的log_prob计算非常复杂，这里提供的是一个近似思路
-    #     # 在很多实现中，可能会用更简化的方式处理熵项
-    #     log_prob = -total_mse_terms
-
-    #     return sampled_action, log_prob
-
-    def action_log_prob(self, obs: PyTorchObs) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        [修正后的版本]
-        使用一个简单、稳健的熵代理 (Entropy Proxy) 来为 SAC 提供熵信号。
-        这个代理鼓励生成的动作不要离一个标准正态分布太远。
-        """
-        # 1. 像以前一样，正常地从扩散模型中采样一个动作
-        sampled_action = self.forward(obs, deterministic=False)
-
-        # 2. 计算熵代理：负的均方误差 (MSE)
-        #    我们希望动作的方差尽可能大（接近标准正态分布的方差1），
-        #    所以我们用它与0的MSE来作为熵的代理。
-        #    一个远离0的动作，其熵更高。
-        #    sum(-action^2) 是高斯分布 log_prob 的核心项。
-        log_prob = -torch.sum(sampled_action**2, dim=-1, keepdim=True)
-
-        log_prob = log_prob * self.entropy_scale
-        # 3. [可选，但推荐] 对 log_prob 进行缩放，以匹配你环境的奖励尺度
-        #    这是一个可以调整的超参数。如果你的奖励在-50左右，
-        #    那么一个-5左右的 log_prob 是比较合适的。
-        #    你可以通过乘以一个常数来调整它。
-        # log_prob = log_prob * 0.1
-
-        # 确保 log_prob 的形状是 (batch_size, 1)
-        return sampled_action, log_prob
+    def forward(self, obs: PyTorchObs, deterministic: bool = False) -> torch.Tensor:
+        features = self.extract_features(obs, self.features_extractor)
+        unbounded_action = self._sample_from_noise(features, deterministic)
+        return torch.tanh(unbounded_action)
 
     def _predict(
         self, observation: PyTorchObs, deterministic: bool = False
     ) -> torch.Tensor:
-        """
-        在SB3框架中用于推理/评估的方法。
-        """
-        # 在推理时不计算梯度，以提高效率
         with torch.no_grad():
             return self.forward(observation, deterministic=deterministic)
+
+    def action_log_prob(
+        self, obs: PyTorchObs, use_entropy_proxy: bool = False
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        生成动作并计算其对数概率。
+        :param obs: 观察值
+        :param use_entropy_proxy: 如果为True，则使用简单的熵代理；否则使用精确的数值积分。
+        :return: (压缩到[-1,1]的动作, 对数概率)
+        """
+        features = self.extract_features(obs, self.features_extractor)
+        unbounded_action = self._sample_from_noise(features, deterministic=False)
+        policy_action = torch.tanh(unbounded_action)
+
+        if use_entropy_proxy:
+            # 使用简单、稳健的熵代理
+            log_prob = -torch.sum(unbounded_action**2, dim=-1, keepdim=True)
+            log_prob = log_prob * self.entropy_scale
+        else:
+            # 使用精确的数值积分计算
+            log_prob = self.approximate_log_prob(features, policy_action)
+
+        return policy_action, log_prob
+
+    # def action_log_prob(self, obs, use_entropy_proxy: bool = True):
+    #     features = self.extract_features(obs, self.features_extractor)
+    #     unbounded_action = self._sample_from_noise(features, deterministic=False)
+    #     policy_action = torch.tanh(unbounded_action)
+
+    #     # 稳健代理：负二范数作为熵近似（永远 ≤ 0）
+    #     log_prob = -torch.sum(unbounded_action**2, dim=-1, keepdim=True)
+    #     log_prob = log_prob * self.entropy_scale  # 建议先设 1.0 或 0.5
+
+    #     return policy_action, log_prob
+
+    def approximate_log_prob(
+        self, features: torch.Tensor, action: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        根据论文公式21，使用数值积分精确地近似log_prob。
+        """
+        # 0. 准备参数
+        B, A = action.shape  # Batch size, Action dimension
+
+        # 将动作从 [-1, 1] 映射回无界空间，因为扩散过程定义在无界空间
+        # 注意：这里假设 forward 采样后，action是tanh()的结果
+        unbounded_action = torch.atanh(action.clamp(-1 + 1e-6, 1 - 1e-6))
+
+        # 1. 准备积分所需的时间步和alpha_bar值
+        # 在 [t_min, t_max] 之间均匀取 T_log_prob+1 个点来定义 T_log_prob 个积分区间
+        time_steps = torch.linspace(
+            self.t_min, self.t_max, self.T_log_prob + 1, device=self.device
+        )
+
+        # 将连续时间 t (0-1) 映射到离散的 schedule 索引 (0 to T-1)
+        discrete_indices = (time_steps * (self.T - 1)).long()
+
+        # 获取 alpha_bar_{t_{i-1}} 和 alpha_bar_{t_i}
+        # alphas_cumprod 是预先计算好的 alpha_bar schedule
+        alpha_hat_t_minus_1 = self.alphas_cumprod[discrete_indices[:-1]]
+        alpha_hat_t = self.alphas_cumprod[discrete_indices[1:]]
+
+        # 2. 向量化计算所有时间步的误差
+        # 扩展维度以进行批处理计算: [B, A] -> [B, N, T, A]
+        action_expanded = (
+            unbounded_action.unsqueeze(1)
+            .unsqueeze(1)
+            .expand(B, self.N_log_prob, self.T_log_prob, A)
+        )
+        features_expanded = (
+            features.unsqueeze(1)
+            .unsqueeze(1)
+            .expand(B, self.N_log_prob, self.T_log_prob, -1)
+        )
+
+        # 扩展时间步相关参数: [T] -> [1, 1, T, 1]
+        alpha_hats_expanded = alpha_hat_t.view(1, 1, self.T_log_prob, 1)
+
+        # 采样N次噪声: [B, N, T, A]
+        epsilon = torch.randn_like(action_expanded)
+
+        # 计算加噪动作 a_t
+        noisy_actions = (
+            torch.sqrt(alpha_hats_expanded) * action_expanded
+            + torch.sqrt(1.0 - alpha_hats_expanded) * epsilon
+        )
+
+        # 扩展离散时间步用于epsilon-net输入: [T] -> [1, 1, T, 1]
+        discrete_t_expanded = (
+            discrete_indices[1:]
+            .view(1, 1, self.T_log_prob, 1)
+            .expand(B, self.N_log_prob, -1, -1)
+        )
+
+        # 预测噪声 ε_φ
+        # reshape for batch matmul: [B*N*T, Dim]
+        predicted_noise = self._epsilon_net(
+            features_expanded.reshape(-1, self.features_dim),
+            noisy_actions.reshape(-1, A),
+            discrete_t_expanded.reshape(-1, 1),
+        ).reshape(B, self.N_log_prob, self.T_log_prob, A)
+
+        # 计算平均MSE误差 ε̃φ
+        error_mse = torch.sum(
+            (epsilon - predicted_noise) ** 2, dim=-1
+        )  # Sum over action dim: [B, N, T]
+        average_mse = torch.mean(error_mse, dim=1)  # Mean over N samples: [B, T]
+
+        # 3. 计算积分权重 w_ti
+        # [T] -> [1, T] for broadcasting
+        alpha_hats_t_reshaped = alpha_hat_t.view(1, -1)
+        alpha_hat_t_minus_1_reshaped = alpha_hat_t_minus_1.view(1, -1)
+
+        # VP SDE 下 σ(α) = α, σ(-α) = 1-α
+        # 这里使用论文中的公式
+        sigma_at = alpha_hats_t_reshaped
+        sigma_neg_at = 1.0 - alpha_hats_t_reshaped
+        sigma_at_prev = alpha_hat_t_minus_1_reshaped
+
+        # w_ti = (σ(α_ti-1) - σ(α_ti)) / (σ(α_ti) * σ(-α_ti))
+        integration_weight = (sigma_at_prev - sigma_at) / (
+            sigma_at * sigma_neg_at + 1e-8
+        )
+
+        # 4. 计算求和项 (d * σ(α_ti) - ε̃φ)
+        term_inside_sum = A * sigma_at - average_mse
+
+        # 5. 最终求和并加上常数 c'
+        # [B, T] * [1, T] -> [B, T], then sum over T dim
+        weighted_term = term_inside_sum * integration_weight
+        sum_term = torch.sum(weighted_term, dim=-1)  # Result shape: [B]
+
+        # c' = -d/2 * log(2πε)
+        c_prime = -0.5 * A * math.log(2 * math.pi * math.e)
+
+        # log p ≈ c' + 1/2 * Σ(...)
+        log_prob = c_prime + 0.5 * sum_term
+
+        return log_prob.unsqueeze(-1)  # Ensure shape is [B, 1]
