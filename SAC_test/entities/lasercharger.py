@@ -51,7 +51,7 @@ class LaserCharger:
 
     # 【关键修改点 2】: 简化充电范围为一个最大半径
     # 对于专用充电桩，我们只关心其最大有效作用范围。
-    effective_charge_radius: float = 250.0  # 最大有效充电距离 (米)
+    effective_charge_radius: float = 150  # 最大有效充电距离 (米)
 
     def _calculate_base_power(self, distance: float) -> float:
         """
