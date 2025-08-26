@@ -44,6 +44,8 @@ class UENode:
         self.generateTask(current_time=0)
 
     def generateTask(self, current_time):
+        added, dropped = 0, 0
+
         # 根据泊松过程生成本时刻的任务数（假设到达率为lambda）
         lambda_task_arrival_rate = self.rng.integers(
             1, 4
@@ -51,7 +53,7 @@ class UENode:
         num_new_tasks = self.rng.poisson(lambda_task_arrival_rate)
         # 生成的任务数为0时，直接返回
         if num_new_tasks == 0:
-            return
+            return 0, 0
         for _ in range(num_new_tasks):
             # 根据nodetype确定任务数据大小和required_cpu范围
             data_size = self.rng.integers(
@@ -73,6 +75,7 @@ class UENode:
             if self.current_cache_size + new_task.data_size <= self.cache_capacity:
                 self.task_queue.append(new_task)  # 如果没有溢出，则添加新任务
                 self.current_cache_size += new_task.data_size
+                added += 1
             else:
                 # 缓存溢出：移除最早的任务，直到腾出需要的空间
                 while (
@@ -85,34 +88,39 @@ class UENode:
                         )
                     removed_task = self.task_queue.popleft()
                     removed_task.status = 3  #  标记为丢弃
-                    logging.warning(
-                        "Task removed due to cache overflow: %s", removed_task
-                    )
+                    # logging.warning(
+                    #     "Task removed due to cache overflow: %s", removed_task
+                    # )
                     # 这里应该记录或许应该可视化。
                     self.current_cache_size -= removed_task.data_size
+                    dropped += 1
 
                 # 添加新任务
                 self.task_queue.append(new_task)
                 self.current_cache_size += new_task.data_size
+                added += 1
+        return added, dropped
 
     def local_offloading(
         self, current_time: float, available_time: float
-    ) -> Tuple[float, float]:
+    ) -> Tuple[float, float, int]:
         """
         完全本地卸载，但会遵守 available_time 的限制。
         它会处理队列中的任务，直到累积处理时间超过 available_time。
-        处理完成的任务会从队列中移除。未处理的任务会保留在队列中。
+        这里会直接对当前uenode的任务队列进行操作。
 
         Args:
             current_time: 开始计算的当前时间。
             available_time: 可用于计算的最大时长。
 
         Returns:
-            一个元组 (处理任务的总延迟, 最后一个完成任务的时间点)。
+            一个元组 (处理任务的总延迟, 最后一个完成任务的时间点，已经完成的任务列表)。
         """
+        # 理想状态是 每个ue经过这个函数后他的任务列表都没有task了。 说明他们都能把自己照顾得很好。
+        # 但是这并不符合情况。
         total_delay = 0.0
         if not self.task_queue:  # 如果没有任务，直接返回0
-            return total_delay, current_time
+            return total_delay, current_time, 0
 
         start_time = current_time
         cumulative_processing_time = 0.0
@@ -132,10 +140,12 @@ class UENode:
                 break  # 超时，停止处理
 
             task.status = 1
-            task.finished_time = start_time + processing_time
-            total_delay += task.finished_time - start_time
-            cumulative_processing_time += processing_time
-            last_completion_time = task.finished_time
+            task.finished_time = start_time + processing_time  # 完成的时间点
+            total_delay += task.finished_time - task.arrival_time  # 总延迟
+            cumulative_processing_time += processing_time  # 总共用了多久
+            last_completion_time = (
+                task.finished_time
+            )  # 当前正在处理的任务完成之后是什么时刻
             start_time = task.finished_time
             processed_tasks_count += 1
 
@@ -145,17 +155,18 @@ class UENode:
             processed_task = self.task_queue.popleft()
             self.current_cache_size -= processed_task.data_size
 
-        return total_delay, last_completion_time
+        return total_delay, last_completion_time, processed_tasks_count
 
     def partial_offloading(
         self, local_task_list: List[Task], current_time: float, available_time: float
-    ) -> Tuple[float, float]:
+    ) -> Tuple[float, float, List[Task]]:
         if not local_task_list:  # 如果没有任务，直接返回0
-            return 0.0, current_time
+            return 0.0, current_time, []
         start_time = current_time  # 记录开始本地处理时当前时间
         total_delay = 0.0
         cumulative_processing_time = 0.0
         last_completion_time = current_time
+        processed_tasks = []  # <-- 新增一个列表来存储成功处理的任务
 
         for task in local_task_list:
             # 动态计算处理时间
@@ -171,8 +182,10 @@ class UENode:
 
             task.status = 1  # 本地完成
             task.finished_time = start_time + processing_time
-            total_delay += task.finished_time - start_time
+            total_delay += task.finished_time - task.arrival_time
             cumulative_processing_time += processing_time
             last_completion_time = task.finished_time
             start_time = task.finished_time
-        return total_delay, last_completion_time
+            processed_tasks.append(task)  # <-- 将处理完的任务加入列表
+
+        return total_delay, last_completion_time, processed_tasks

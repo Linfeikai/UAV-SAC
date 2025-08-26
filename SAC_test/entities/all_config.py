@@ -14,12 +14,13 @@ CACHE_SIZE = {
     Nodetype.HPC: 5e8,  # 拥有最大的缓存，符合其高性能节点的定位
 }
 
-# 每个任务的大小
+# 每个任务的大小 (bit)
 DATA_SIZE_RANGES = {
-    Nodetype.NORMAL: (500_000, 1_000_001),  # 单位: bit
-    Nodetype.MODERATE: (2_000_000, 5_000_001),
-    Nodetype.HPC: (1_000_000, 3_000_001),
+    Nodetype.NORMAL: (1_000_000, 2_000_001),  # 增大了约2倍
+    Nodetype.MODERATE: (5_000_000, 10_000_001),  # 增大了约2.5倍
+    Nodetype.HPC: (3_000_000, 6_000_001),  # 增大了约2倍
 }
+
 # UE本地计算能力
 CPU_RANGES = {
     Nodetype.NORMAL: (5e8, 1e9),  # 单位: cycle/s
@@ -29,10 +30,17 @@ CPU_RANGES = {
 
 # 建议新增：计算密度 (单位: cycle/bit)
 WORKLOAD_INTENSITY = {
-    Nodetype.NORMAL: 50,  # 普通任务，计算需求低
-    Nodetype.MODERATE: 150,  # 中等任务，例如你之前的设定
-    Nodetype.HPC: 600,  # 高密度计算，每个bit都需要大量计算周期
+    Nodetype.NORMAL: 400,  # 普通任务，计算需求低
+    Nodetype.MODERATE: 800,  # 中等任务，例如你之前的设定
+    Nodetype.HPC: 1500,  # 高密度计算，每个bit都需要大量计算周期
+}
+
+TASK_TYPE_DISTRIBUTION = {
+    Nodetype.NORMAL: 0.6,
+    Nodetype.MODERATE: 0.3,
+    Nodetype.HPC: 0.1,
 }
 
 GROUND_WIDTH = 400  # 场地宽度
 GROUND_HEIGHT = 400  # 场地高度
+UE_NUM = 20  # ue数量
