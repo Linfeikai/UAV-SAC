@@ -33,13 +33,27 @@
   # learning_rate: 0.00003
   total_timesteps: 100000
   qne_k_samples: 64 # QNE中的K值 表示每次生成几个候选解
-  qne_temperature: 0.01 # QNE的温度参数，用于控制Softmax的平滑度
+  qne_temperature: 0.05 # QNE的温度参数，用于控制Softmax的平滑度
   policy_kwargs:
-    T: 25 # 扩散模型的时间步数
+    T: 15 # 扩散模型的时间步数
     net_arch: [256, 256] # 神经网络的架构
   wrapper_kwargs:
     ue_embedding_dim: 8 # 用户设备的嵌入向量维度
 
+
+- 
+  experiment_name: "DACER"
+  agent_type: "dacer_sac"
+  learning_starts: 10000 # 经验回放开始训练的步数
+  # learning_rate: 0.00003
+  total_timesteps: 100000
+  qne_k_samples: 64 # QNE中的K值 表示每次生成几个候选解
+  qne_temperature: 0.1 # QNE的温度参数，用于控制Softmax的平滑度
+  policy_kwargs:
+    T: 15 # 扩散模型的时间步数
+    net_arch: [256, 256] # 神经网络的架构
+  wrapper_kwargs:
+    ue_embedding_dim: 8 # 用户设备的嵌入向量维度
 
 # 你还可以定义更复杂的层级，比如超参数
 - 

@@ -225,7 +225,7 @@ class DiffusionPolicyActor(BasePolicy):
             pred_x0 = (
                 action_t - torch.sqrt(1.0 - alpha_bar_t).view(-1, 1) * predicted_noise
             ) / torch.sqrt(alpha_bar_t).view(-1, 1)
-            pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
+            # pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
 
             # 正确的 posterior mean 系数
             denom = (1.0 - alpha_bar_t).view(-1, 1)
@@ -248,7 +248,7 @@ class DiffusionPolicyActor(BasePolicy):
                 action_t = posterior_mean
 
         # 返回最终的无界动作(这里是[-1,1]的)
-        return torch.atanh(action_t.clamp(-1 + 1e-6, 1 - 1e-6))
+        return action_t
 
     def forward(self, obs: PyTorchObs, deterministic: bool = False) -> torch.Tensor:
         features = self.extract_features(obs, self.features_extractor)
