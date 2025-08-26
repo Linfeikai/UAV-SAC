@@ -15,6 +15,8 @@ from stable_baselines3.common.callbacks import (
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.vec_env import VecNormalize
+
 
 import yaml
 import argparse
@@ -59,7 +61,7 @@ register(
 )
 # 1. 定义两个不同的初始学习率
 # Actor可以快一点，因为它需要探索。Critic必须稳，所以让它慢得多。
-lr_actor_initial = 3e-4  # 保持原来的值
+lr_actor_initial = 1e-4  # 保持原来的值
 lr_critic_initial = 3e-4  # 升高一个数量级
 lr_final = 1e-6  # 最终学习率
 
@@ -367,9 +369,9 @@ def run_vanilla_sac(config: dict):
     os.makedirs(save_path, exist_ok=True)  # 确保模型保存目录存在
 
     wandb.init(
-        project="SAC-env_2.0",  # 项目名称（wandb 仪表盘中显示）
+        project="Diffusion-debug",  # 项目名称（wandb 仪表盘中显示）
         name=experiment_name,  # 实验名称（可选）
-        notes="add service counts",  # 实验备注（可选）
+        notes="作对比",  # 实验备注（可选）
         # config={  # 记录超参数（可选）
         #     # "policy": "MlpPolicy",
         #     "total_timesteps": 100000,
@@ -511,9 +513,9 @@ def run_diffusion_sac(config: dict):
     )
     # 2.初始化wandb
     wandb.init(
-        project="SAC-env_2.0",  # 项目名称（wandb 仪表盘中显示）
+        project="Diffusion-debug",  # 项目名称（wandb 仪表盘中显示）
         name=experiment_name,  # 实验名称（可选）
-        notes="gpt:scale/unscale;qne:double q;grad_norm sitck to 5;ent=0",  # 实验备注（可选）
+        notes="解决diffusion无法拟合多峰分布",  # 实验备注（可选）
         config={  # 记录超参数（可选）
             # "policy": "MlpPolicy",
             "learning_starts": learning_starts,
@@ -537,6 +539,7 @@ def run_diffusion_sac(config: dict):
         env=env,  # <-- 传入被包裹后的环境
         tensorboard_log=log_path,  # 保存日志用于TensorBoard可视化
         verbose=1,
+        # batch_size=512,  # 经验回放的批量大小
         learning_starts=learning_starts,  # 经验回放开始训练的步数
         qne_k_samples=qne_k_samples,  # QNE中的K值
         policy_kwargs=policy_kwargs,  # 传入扩散模型和QNE所需的特定超参数
