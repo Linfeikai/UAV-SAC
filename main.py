@@ -312,6 +312,76 @@ class SACWrapper(gym.Wrapper):
     # reset 方法不需要修改，它会自动调用底层环境的 reset
 
 
+# =====================================================================================
+# 新增函数: 两阶段训练法 - 阶段一
+# =====================================================================================
+def collect_teacher_buffer(config: dict, buffer_save_path: str) -> None:
+    """
+    使用标准的SAC Agent（老师）训练一段时间，以填充Replay Buffer，并将其保存到磁盘。
+
+    Args:
+        config (dict): 包含标准SAC超参数的配置字典。
+        buffer_save_path (str): 保存 Replay Buffer 的文件路径。
+    """
+    print("\n--- [阶段一] 开始: 使用标准SAC收集高质量经验 ---")
+
+    # 从配置中获取老师Agent的参数
+    # 你可以为此在YAML中创建一个新的实验，或者复用现有的vanilla_sac配置
+    learning_rate = config.get("learning_rate", 3e-4)
+    buffer_size = config.get("buffer_size", 1_000_000)
+    # 关键参数：定义老师需要训练多少步来收集数据
+    collection_timesteps = config.get("total_timesteps", 50000)
+    # 获取 wrapper_kwargs，以便传递给UAVEnvWrapper
+    # 我们假设老师和学生的wrapper配置是一样的
+    # 通常你会在diffusion_sac的配置里定义wrapper_kwargs
+    student_config = None
+    for exp in all_experiments:
+        if exp.get("teacher_config_name") == config["experiment_name"]:
+            student_config = exp
+            break
+    if not student_config:
+        # 如果找不到，就用一个默认值
+        wrapper_kwargs = {"ue_embedding_dim": 8}
+        print("警告：无法在学生配置中找到wrapper_kwargs，将使用默认值。")
+    else:
+        wrapper_kwargs = student_config.get("wrapper_kwargs", {"ue_embedding_dim": 8})
+
+    # 创建用于数据收集的环境（与vanilla_sac中的环境完全相同）
+    env = make_vec_env(
+        "UAVEnv-v1",
+        n_envs=4,
+        vec_env_cls=SubprocVecEnv,
+        seed=SEED,
+        wrapper_class=UAVEnvWrapper,  # <--- 使用和学生一样的Wrapper
+        wrapper_kwargs=wrapper_kwargs,  # <--- 传递Wrapper所需的参数
+    )
+
+    # 初始化标准的SAC模型作为“老师”
+    teacher_agent = SAC(
+        "MlpPolicy",
+        env,
+        verbose=1,
+        learning_rate=learning_rate,
+        buffer_size=buffer_size,
+        learning_starts=1000,  # 确保在开始学习前有足够的随机探索
+        gamma=config.get("gamma", 0.99),
+        batch_size=config.get("batch_size", 256),
+        tau=config.get("tau", 0.005),
+    )
+
+    # 训练老师Agent指定步数
+    print(f"老师(SAC)将训练 {collection_timesteps} 步来填充经验池...")
+    teacher_agent.learn(total_timesteps=collection_timesteps, log_interval=10)
+
+    # 保存经验池到指定路径
+    print(f"数据收集完成，将经验池保存到: {buffer_save_path}")
+    teacher_agent.save_replay_buffer(buffer_save_path)
+
+    print("--- [阶段一] 结束 ---")
+    env.close()
+    del teacher_agent
+
+
 def run_experiment(config: dict):
     """
     根据给定的配置字典，运行单个实验。
@@ -336,7 +406,38 @@ def run_experiment(config: dict):
     elif agent_type == "ppo":
         run_ppo(config)
     elif agent_type == "diffusion_sac":
-        run_diffusion_sac(config)
+        # =====================================================================================
+        # 修改: 检查是否启用两阶段训练
+        # =====================================================================================
+        # 我们约定，如果在diffusion_sac的配置中加入了"two_stage_training": true
+        # 并且定义了 "teacher_config_name"，那么就启用两阶段训练
+        if config.get("two_stage_training", False):
+            print("检测到启用两阶段训练模式...")
+            teacher_config_name = config.get("teacher_config_name")
+            if not teacher_config_name:
+                raise ValueError("两阶段训练模式需要指定 'teacher_config_name'！")
+
+            # 在所有实验配置中找到老师的配置
+            teacher_config = None
+            for exp in all_experiments:  # `all_experiments` 需在主逻辑中可访问
+                if exp["experiment_name"] == teacher_config_name:
+                    teacher_config = exp
+                    break
+            if not teacher_config:
+                raise ValueError(f"找不到名为 '{teacher_config_name}' 的老师配置！")
+
+            # 定义预训练buffer的保存路径
+            buffer_path = os.path.join("buffers", f"{teacher_config_name}_buffer.pkl")
+            os.makedirs("buffers", exist_ok=True)
+
+            # 阶段一：运行老师SAC来收集数据并保存buffer
+            collect_teacher_buffer(teacher_config, buffer_path)
+
+            # 阶段二：运行Diffusion SAC，并加载预训练的buffer
+            run_diffusion_sac(config, pretrained_buffer_path=buffer_path)
+        else:
+            # 如果不启用，则正常运行
+            run_diffusion_sac(config)
     # 在这里可以添加你自己改进的SAC算法的逻辑
     # elif agent_type == "my_sac_v1":
     #     model = MySACv1(...) # 使用你的自定义参数
@@ -477,7 +578,15 @@ def SAC_hybrid_test():
     model.save(os.path.join(save_dir, f"hybrid_sac_model_{timestamp}"))
 
 
-def run_diffusion_sac(config: dict):
+def run_diffusion_sac(config: dict, pretrained_buffer_path: Optional[str] = None):
+    """
+    运行Diffusion SAC实验。
+
+    Args:
+        config (dict): Diffusion SAC的配置字典。
+        pretrained_buffer_path (Optional[str]): 如果提供，则从该路径加载预训练的Replay Buffer。
+    """
+
     # 要创建的并行环境数量
     num_envs = 4
 
@@ -491,7 +600,13 @@ def run_diffusion_sac(config: dict):
     policy_kwargs["lr_critic_schedule"] = linear_schedule(lr_critic_initial)
     qne_k_samples = config.get("qne_k_samples", 8)
     total_timesteps = config.get("total_timesteps", 1_000_000)
-    learning_starts = config.get("learning_starts", 50000)  # 经验回放开始训练的步数
+    # learning_starts = config.get("learning_starts", 50000)  # 经验回放开始训练的步数
+    # 关键修改：如果使用预训练buffer，我们希望Agent立即开始学习
+    # 否则，使用配置文件中定义的learning_starts
+    learning_starts = (
+        0 if pretrained_buffer_path else config.get("learning_starts", 50000)
+    )
+
     # learning_rate = config.get("learning_rate", 3e-4)
     qne_temperature = config.get(
         "qne_temperature", 5.0
@@ -515,7 +630,7 @@ def run_diffusion_sac(config: dict):
     wandb.init(
         project="Diffusion-debug",  # 项目名称（wandb 仪表盘中显示）
         name=experiment_name,  # 实验名称（可选）
-        notes="解决diffusion无法拟合多峰分布",  # 实验备注（可选）
+        notes="gradien_steps从1->4;学习率减半",  # 实验备注（可选）
         config={  # 记录超参数（可选）
             # "policy": "MlpPolicy",
             "learning_starts": learning_starts,
@@ -547,6 +662,18 @@ def run_diffusion_sac(config: dict):
         qne_temperature=qne_temperature,  # QNE的温度参数
         # ... 其他所有超参数 ...
     )
+    # =====================================================================================
+    # 新增逻辑: 加载预训练的 Replay Buffer
+    # =====================================================================================
+    if pretrained_buffer_path:
+        print(f"\n--- [阶段二] 开始: 加载来自 '{pretrained_buffer_path}' 的经验池 ---")
+        # 检查文件是否存在
+        if not os.path.exists(pretrained_buffer_path):
+            raise FileNotFoundError(
+                f"预训练的经验池文件未找到: {pretrained_buffer_path}"
+            )
+        model.load_replay_buffer(pretrained_buffer_path)
+        print(f"经验池加载成功! 当前大小: {model.replay_buffer.size()}")
 
     print("--- 开始在您的自定义无人机环境上训练 DiffusionSACAgent ---")
     model.learn(
@@ -915,17 +1042,6 @@ def run_rule_based_agent(num_episodes: int = 5):
 
 
 if __name__ == "__main__":
-    # test_rule_based_agent()
-    # test_model()
-    # TD3_test()
-    # TD3_useThebest()
-    # SACtest()
-    # test_model()
-    # SAC_hybrid_test()
-    # find_best_hyperparameters()
-    # find_best_hyperparameters_sweep()
-    # --- 这是脚本的主入口 ---
-    # test_diffusion_sac()
     # 1. 创建一个命令行参数解析器
     parser = argparse.ArgumentParser(
         description="Run RL experiments based on a YAML config file."

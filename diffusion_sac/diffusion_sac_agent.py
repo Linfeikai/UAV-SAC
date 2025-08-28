@@ -56,10 +56,10 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
         buffer_size: int = 1_000_000,
         learning_starts: int = 10000,
         batch_size: int = 256,
-        tau: float = 0.0005,
+        tau: float = 0.001,
         gamma: float = 0.99,
         train_freq: Union[int, Tuple[int, str]] = 1,
-        gradient_steps: int = 1,
+        gradient_steps: int = 4,
         # --- 移除了 HybridSAC 特有的、不再需要的参数 ---
         replay_buffer_class: Optional[
             Type[ReplayBuffer]
@@ -236,8 +236,11 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
                     next_actions, next_log_prob = self.actor.action_log_prob(
                         replay_data.next_observations
                     )
-                    # 【新增修复】将策略域的动作转换到环境域
+
+                    # 将策略域的动作转换到环境域
                     next_actions = self._to_env_space(next_actions)
+
+                    # --- 平滑化结束 ---
 
                     # next_actions = self.actor(
                     #     replay_data.next_observations, deterministic=False
@@ -353,7 +356,8 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
 
             # --- 3. Actor Loss 计算 (QNE核心逻辑) ---
             # 这里的逻辑完全取代了原始SAC的Actor Loss
-            if (self._n_updates + 1) % 2 == 0:
+            if True:
+                # if (self._n_updates + 1) % 2 == 0:
                 # (a) 准备计算Actor Loss所需的数据
                 # 我们需要从replay_data中获取干净的动作`a` (即 `replay_data.actions`)
                 # 和对应的状态`s` (即 `replay_data.observations`)
@@ -421,15 +425,16 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
                     k_candidate_actions = (
                         a_t_expanded - sqrt_one_minus_alpha_bar_exp * k_noises
                     ) / sqrt_alpha_bar_exp  # [B, K, A_dim]
+                    policy_k_candidate_actions = th.tanh(k_candidate_actions)
+                    env_k_candidate_actions = self._to_env_space(
+                        policy_k_candidate_actions
+                    )
 
                     #    ii. Critic打分
                     states_expanded = states_from_buffer.unsqueeze(1).expand(
                         -1, self.qne_k_samples, -1
                     )  # [B, 1, S_dim] -> [B, K, S_dim]
-                    policy_k_candidate_actions = th.tanh(k_candidate_actions)
-                    env_k_candidate_actions = self._to_env_space(
-                        policy_k_candidate_actions
-                    )
+
                     # ======================= 在这里加入关键的修正代码 =======================
                     # 在送入Critic之前，将所有候选动作裁剪到有效范围 [-1, 1]
                     # action_space.low 和 high 通常是 -1 和 1，这里用它们来确保通用性
@@ -527,6 +532,8 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
                     predicted_noise = self.actor._epsilon_net(
                         states_from_buffer, noisy_actions_t, t
                     )
+                    # 换掉actor_loss
+                    # actor_loss = (w_t * (predicted_noise - target_noise.detach())**2).mean()
 
                     # (f) 计算最终的Actor Loss (MSE)
                     actor_loss = F.mse_loss(
