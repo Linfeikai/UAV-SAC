@@ -253,7 +253,8 @@ class CustomEnv(gym.Env):
                 (new_x - self.uav.loc[0]) ** 2 + (new_y - self.uav.loc[1]) ** 2
             )
             angle = math.atan2(new_y - self.uav.loc[1], new_x - self.uav.loc[0])
-            # 因为撞墙，速度应该衰减为0
+            # 因为撞墙，速度应该衰减为0是
+
             new_velocity = 0.0
 
         # 3. 调用 uav.moveto()，它会处理电量问题
@@ -306,21 +307,46 @@ class CustomEnv(gym.Env):
         所以他们的计算时间是不会超出可用时间的
         那么到底是否超时，只能通过遍历当前服务结点的tasklist看状态
         """
-        # 0. 如果节点没有任务，直接返回
-        if not served_ue.task_queue:
-            return (
-                0,
-                0,
-                self.current_time,
-                0,
-                0,
-                0,
-            )  # (delay, energy, ..., num_processed)
-            # 1. 任务分配 (不变)
-        original_task_list = list(served_ue.task_queue)  # 创建一个副本用于操作
-        local_task_num = int(len(original_task_list) * (1 - offloading_ratio))
-        local_tasks_to_process = original_task_list[:local_task_num]
-        uav_tasks_to_process = original_task_list[local_task_num:]
+        # 1. 任务分配 (不变)
+
+        # ADD THIS NEW BLOCK
+        # The core principle: Tasks are ATOMIC. We do NOT split a single task.
+        # We are simply deciding which WHOLE tasks from the queue go to the UE vs. the UAV.
+
+        original_task_list = list(served_ue.task_queue)
+        if not original_task_list:
+            # Handle the case where there are no tasks, to be safe.
+            # The '1.0' at the end corresponds to the cleared_flag.
+            return (0, 0, self.current_time, 0, 0, 0, 0, 1.0)
+
+        total_data_size = sum(task.data_size for task in original_task_list)
+
+        # The agent's `offloading_ratio` determines the ideal target size
+        # for tasks that should be processed LOCALLY.
+        target_local_data_size = total_data_size * (1 - offloading_ratio)
+
+        # We will now find the split point that gets the local workload size
+        # as close as possible to the target, ensuring tasks remain whole.
+        best_split_index = 0
+        smallest_error = float("inf")
+
+        # Iterate through all possible split points (from 0 to N tasks being local)
+        for i in range(len(original_task_list) + 1):
+            # Calculate the total size if we split at this point `i`
+            # The first `i` tasks would be the local pile.
+            local_pile_size = sum(task.data_size for task in original_task_list[:i])
+
+            error = abs(target_local_data_size - local_pile_size)
+
+            if error < smallest_error:
+                smallest_error = error
+                best_split_index = i
+
+        # Now, we perform the actual split based on the calculated best index.
+        # All tasks remain whole and unsplit.
+        local_tasks_to_process = original_task_list[:best_split_index]
+        uav_tasks_to_process = original_task_list[best_split_index:]
+
         hover_time = max(0.0, hover_time)
 
         # 计算当前结点任务的紧急程度，即如果他是完全本地卸载，能否在当前step内完成
@@ -423,6 +449,7 @@ class CustomEnv(gym.Env):
             t_tr,  # 传输时延
             urgency_ratio,  # 新增
             1.0 if served_queue_cleared else 0.0,  # 新增
+            processed_by_uav,  # 新增uav处理的队列
         )
 
     def _process_served_ue(self, ue_id, offloading_ratio, hover_time):
@@ -438,6 +465,7 @@ class CustomEnv(gym.Env):
             t_tr,
             urgency_ratio,
             cleared_flag,
+            processed_by_uav,
         ) = self.com_delay(served_ue, offloading_ratio, hover_time)
 
         # 充电
@@ -455,6 +483,7 @@ class CustomEnv(gym.Env):
             "t_tr": t_tr,
             "urgency_ratio": urgency_ratio,
             "cleared_flag": cleared_flag,
+            "processed_by_uav": processed_by_uav,  # <-- 【新增】存入字典
         }
 
     def _process_unserved_ues(self, served_ue_id, delay_info):
@@ -894,14 +923,14 @@ class CustomEnv(gym.Env):
         # )
         backlog = sum(len(n.task_queue) for n in self.nodeList)
         A = max(self.ep_arrived, 1)
-        completion_rate = self.ep_completed / A
-        drop_rate = self.ep_dropped / A
+        completion_rate = self.ep_completed / self.current_step
+        drop_rate = self.ep_dropped / self.current_step
         backlog_rate = backlog / A
 
         fig.suptitle(
             f"Episode Summary (Steps: {self.current_step}) | "
-            f"completion_rate: {completion_rate:.2%} | "
-            f"drop_rate: {drop_rate:.2%} | "
+            f"completion_throughput: {completion_rate} | "
+            f"drop_throughput: {drop_rate} | "
             f"backlog_rate: {backlog_rate:.2%} | "
             f"Avg Delay: {self.total_episode_delay / self.total_tasks if self.total_tasks > 0 else 0:.2f}s | "
             f"Final Fairness: {self.previous_fairness_index:.3f}",
@@ -1213,8 +1242,8 @@ class CustomEnv(gym.Env):
         print("\n" + "=" * 50)
         print("EPISODE FINISHED - FINAL STATISTICS")
         print(f"  - Total Steps: {self.current_step}")
-        print(f"  - Task completion Rate: {completion_rate:.2%}")
-        print(f"  - Task drop Rate: {drop_rate:.2%}")
+        print(f"  - Completion Throughput: {completion_rate}")
+        print(f"  - Drop Throughput: {drop_rate}")
         print(f"  - Task backlog Rate: {backlog_rate:.2%}")
 
         if self.total_tasks > 0:
