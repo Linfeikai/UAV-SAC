@@ -59,7 +59,7 @@ class DiffusionSACAgent(OffPolicyAlgorithm):
         tau: float = 0.001,
         gamma: float = 0.99,
         train_freq: Union[int, Tuple[int, str]] = 1,
-        gradient_steps: int = 4,
+        gradient_steps: int = 6,
         # --- 移除了 HybridSAC 特有的、不再需要的参数 ---
         replay_buffer_class: Optional[
             Type[ReplayBuffer]
