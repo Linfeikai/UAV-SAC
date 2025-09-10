@@ -444,17 +444,17 @@ def run_calibration(num_episodes=100, agent_type="heuristic"):
 ======================================================================
 """
 if __name__ == "__main__":
-    # # 1. 执行静态理论分析
-    # perform_theoretical_analysis()
+    # 1. 执行静态理论分析
+    perform_theoretical_analysis()
 
-    # # 2. 初始化环境和审计器
-    # env = CustomEnv()
-    # auditor = EnvironmentAuditor(env)
+    # 2. 初始化环境和审计器
+    env = CustomEnv()
+    auditor = EnvironmentAuditor(env)
 
-    # # 3. 运行动态探测
-    # # 更多回合数结果更稳定，但耗时更长。建议从20-50个开始。
-    # auditor.run_simulation(n_episodes=100, seed=42)
+    # 3. 运行动态探测
+    # 更多回合数结果更稳定，但耗时更长。建议从20-50个开始。
+    auditor.run_simulation(n_episodes=100, seed=42)
 
-    # # 4. 生成最终的综合报告
-    # auditor.generate_report()
-    run_calibration()
+    # 4. 生成最终的综合报告
+    auditor.generate_report()
+    # run_calibration()
