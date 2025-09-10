@@ -17,6 +17,7 @@ from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.vec_env import VecNormalize
 
+from datetime import datetime
 
 import yaml
 import argparse
@@ -25,6 +26,8 @@ import random
 from SAC_test.rule_based_agent import RuleBasedAgent
 import wandb
 from wandb.integration.sb3 import WandbCallback
+from torch.optim import AdamW
+from torch.optim import Adam
 # from swanlab.integration.sb3 import SwanLabCallback
 
 
@@ -37,6 +40,8 @@ from typing import Dict, List, Optional, Tuple
 
 from gymnasium.wrappers import TimeLimit
 import warnings
+import statistics
+
 # import swanlab
 
 # swanlab.sync_wandb()
@@ -61,8 +66,8 @@ register(
 )
 # 1. 定义两个不同的初始学习率
 # Actor可以快一点，因为它需要探索。Critic必须稳，所以让它慢得多。
-lr_actor_initial = 1e-4  # 保持原来的值
-lr_critic_initial = 3e-4  # 升高一个数量级
+lr_actor_initial = 5e-5  # 保持原来的值
+lr_critic_initial = 1.5e-4  # 升高一个数量级
 lr_final = 1e-6  # 最终学习率
 
 
@@ -135,9 +140,17 @@ class ParallelEpisodeMetricCallback(BaseCallback):
             _, _, _, infos = self.training_env.step(
                 [self.training_env.action_space.sample() for _ in range(num_envs)]
             )
-            self.metrics_to_track = [
-                k for k in infos[0].keys() if not k.startswith("_")
-            ]
+            inferred_metrics = []
+            if infos:  # 确保 infos 列表不为空
+                sample_info = infos[0]  # 取第一个环境的 info 字典作为样本
+                for k, v in sample_info.items():
+                    # 排除以下划线开头的私有键，并且只追踪数值型标量
+                    if not k.startswith("_") and isinstance(v, (int, float, np.number)):
+                        inferred_metrics.append(k)
+                    # 可选：如果你想看到哪些非标量指标被忽略了，可以取消下面这行的注释
+                    # elif self.verbose > 0:
+                    #     print(f"Warning: Metric '{k}' (type: {type(v)}) will be ignored for averaging.")
+            self.metrics_to_track = inferred_metrics
 
         # 初始化每个环境的缓冲区
         for i in range(num_envs):
@@ -159,11 +172,14 @@ class ParallelEpisodeMetricCallback(BaseCallback):
             info = self.locals["infos"][i]
             done = self.locals["dones"][i]
 
-            # 持续为每个环境的缓冲区收集数据
             for metric in self.metrics_to_track:
                 # 确保 info 字典中有我们想追踪的 metric
                 if metric in info:
                     self.env_metric_buffers[i][metric].append(info[metric])
+                else:
+                    # 如果某个指标在当前步缺失，追加一个默认值（例如 0.0）
+                    # 这样可以保证列表长度一致，避免潜在的问题
+                    self.env_metric_buffers[i][metric].append(0.0)  # 或者 np.nan
 
             # (# MODIFIED) 如果当前环境的 episode 结束了
             if done:
@@ -317,43 +333,41 @@ class SACWrapper(gym.Wrapper):
 # =====================================================================================
 def collect_teacher_buffer(config: dict, buffer_save_path: str) -> None:
     """
-    使用标准的SAC Agent（老师）训练一段时间，以填充Replay Buffer，并将其保存到磁盘。
-
-    Args:
-        config (dict): 包含标准SAC超参数的配置字典。
-        buffer_save_path (str): 保存 Replay Buffer 的文件路径。
+    【单环境修正版】
+    使用标准的SAC Agent（老师）在单个、非并行的环境中训练，以填充Replay Buffer。
     """
-    print("\n--- [阶段一] 开始: 使用标准SAC收集高质量经验 ---")
+    print("\n--- [阶段一 - 单环境模式] 开始: 使用标准SAC收集高质量经验 ---")
 
-    # 从配置中获取老师Agent的参数
-    # 你可以为此在YAML中创建一个新的实验，或者复用现有的vanilla_sac配置
+    # (这部分参数获取逻辑保持不变)
     learning_rate = config.get("learning_rate", 3e-4)
     buffer_size = config.get("buffer_size", 1_000_000)
-    # 关键参数：定义老师需要训练多少步来收集数据
-    collection_timesteps = config.get("total_timesteps", 50000)
-    # 获取 wrapper_kwargs，以便传递给UAVEnvWrapper
-    # 我们假设老师和学生的wrapper配置是一样的
-    # 通常你会在diffusion_sac的配置里定义wrapper_kwargs
     student_config = None
     for exp in all_experiments:
         if exp.get("teacher_config_name") == config["experiment_name"]:
             student_config = exp
             break
     if not student_config:
-        # 如果找不到，就用一个默认值
         wrapper_kwargs = {"ue_embedding_dim": 8}
         print("警告：无法在学生配置中找到wrapper_kwargs，将使用默认值。")
     else:
         wrapper_kwargs = student_config.get("wrapper_kwargs", {"ue_embedding_dim": 8})
+    n_envs = 4  # <--- 定义并行数
+    original_timesteps = config.get("total_timesteps", 100000)
 
-    # 创建用于数据收集的环境（与vanilla_sac中的环境完全相同）
+    # ========================== 核心修正：补偿Bug ==========================
+    # 为了抵消那个“步数除以4”的Bug，我们在这里主动将目标步数乘以4
+    collection_timesteps = original_timesteps * n_envs
+    print(
+        f"[补偿机制] 原始目标步数: {original_timesteps}, 补偿后传递给learn()的步数: {collection_timesteps}"
+    )
+    # =====================================================================
     env = make_vec_env(
         "UAVEnv-v1",
-        n_envs=4,
+        n_envs=n_envs,
         vec_env_cls=SubprocVecEnv,
         seed=SEED,
-        wrapper_class=UAVEnvWrapper,  # <--- 使用和学生一样的Wrapper
-        wrapper_kwargs=wrapper_kwargs,  # <--- 传递Wrapper所需的参数
+        wrapper_class=UAVEnvWrapper,
+        wrapper_kwargs=wrapper_kwargs,
     )
 
     # 初始化标准的SAC模型作为“老师”
@@ -363,7 +377,7 @@ def collect_teacher_buffer(config: dict, buffer_save_path: str) -> None:
         verbose=1,
         learning_rate=learning_rate,
         buffer_size=buffer_size,
-        learning_starts=1000,  # 确保在开始学习前有足够的随机探索
+        learning_starts=1000,
         gamma=config.get("gamma", 0.99),
         batch_size=config.get("batch_size", 256),
         tau=config.get("tau", 0.005),
@@ -371,13 +385,13 @@ def collect_teacher_buffer(config: dict, buffer_save_path: str) -> None:
 
     # 训练老师Agent指定步数
     print(f"老师(SAC)将训练 {collection_timesteps} 步来填充经验池...")
-    teacher_agent.learn(total_timesteps=collection_timesteps, log_interval=10)
+    teacher_agent.learn(total_timesteps=collection_timesteps, log_interval=200)
 
     # 保存经验池到指定路径
     print(f"数据收集完成，将经验池保存到: {buffer_save_path}")
     teacher_agent.save_replay_buffer(buffer_save_path)
 
-    print("--- [阶段一] 结束 ---")
+    print("--- [阶段一 - 单环境模式] 结束 ---")
     env.close()
     del teacher_agent
 
@@ -470,9 +484,9 @@ def run_vanilla_sac(config: dict):
     os.makedirs(save_path, exist_ok=True)  # 确保模型保存目录存在
 
     wandb.init(
-        project="Diffusion-debug",  # 项目名称（wandb 仪表盘中显示）
+        project="Env-uav-transform",  # 项目名称（wandb 仪表盘中显示）
         name=experiment_name,  # 实验名称（可选）
-        notes="作对比",  # 实验备注（可选）
+        notes="修改了offloading_ratio的定义",  # 实验备注（可选）
         # config={  # 记录超参数（可选）
         #     # "policy": "MlpPolicy",
         #     "total_timesteps": 100000,
@@ -517,7 +531,95 @@ def run_vanilla_sac(config: dict):
 
 
 def run_ppo(config: dict):
-    print()
+    """
+    根据给定的配置，运行 PPO 实验。
+    """
+    print(f"\n--- [PPO 模式] 开始: {config.get('experiment_name', 'PPO-Default')} ---")
+
+    # 1. 从配置中获取超参数，如果未提供则使用 PPO 的常见默认值
+    experiment_name = config.get("experiment_name", "PPO-UAV")
+    total_timesteps = config.get("total_timesteps", 100000)
+    n_envs = config.get("n_envs", 4)
+
+    # PPO 核心超参数
+    learning_rate = config.get("learning_rate", 3e-4)
+    n_steps = config.get("n_steps", 2048)  # PPO 单次数据收集的步数，非常关键
+    batch_size = config.get("batch_size", 64)  # mini-batch size
+    n_epochs = config.get("n_epochs", 10)  # 每次更新策略的 epoch 数
+    gamma = config.get("gamma", 0.99)
+    gae_lambda = config.get("gae_lambda", 0.95)
+    clip_range = config.get("clip_range", 0.2)
+
+    # 环境包装器参数
+    wrapper_kwargs = config.get("wrapper_kwargs", {"ue_embedding_dim": 8})
+
+    # 2. 设置日志和模型保存路径
+    log_path = os.path.join("logs", experiment_name)
+    save_path = os.path.join("models", experiment_name)
+    os.makedirs(log_path, exist_ok=True)
+    os.makedirs(save_path, exist_ok=True)
+
+    # 3. 初始化 Wandb
+    wandb.init(
+        project="Env-uav-transform",  # 您可以为 PPO 实验指定一个新的项目名
+        name=experiment_name,
+        notes=config.get("notes", "Standard PPO run on UAVEnv-v1"),
+        config=config,  # 将整个配置字典上传到 wandb，方便追溯
+        sync_tensorboard=True,
+    )
+
+    # 4. 创建并行化的、被包装过的环境
+    # 对于 PPO 这种需要连续动作空间的 Agent，UAVEnvWrapper 是一个很好的选择
+    env = make_vec_env(
+        "UAVEnv-v1",
+        n_envs=n_envs,
+        vec_env_cls=SubprocVecEnv,
+        seed=SEED,
+        wrapper_class=UAVEnvWrapper,
+        wrapper_kwargs=wrapper_kwargs,
+    )
+
+    # 5. 初始化回调函数
+    metric_callback = ParallelEpisodeMetricCallback(verbose=1)
+
+    # 6. 初始化 PPO 模型
+    model = PPO(
+        "MlpPolicy",
+        env,
+        learning_rate=learning_rate,
+        n_steps=n_steps,
+        batch_size=batch_size,
+        n_epochs=n_epochs,
+        gamma=gamma,
+        gae_lambda=gae_lambda,
+        clip_range=clip_range,
+        verbose=1,
+        tensorboard_log=log_path,
+        seed=SEED,
+    )
+
+    # 7. 训练模型
+    print(f"--- [PPO] 开始训练, 总步数: {total_timesteps} ---")
+    model.learn(
+        total_timesteps=total_timesteps,
+        callback=metric_callback,
+        log_interval=10,  # 和您的 SAC 设置保持一致
+    )
+    print("--- [PPO] 训练完成 ---")
+
+    # 8. 结束 Wandb run
+    wandb.finish()
+
+    # 9. 保存最终模型
+    import time
+
+    timestamp = int(time.time())
+    model_name = f"{experiment_name}_{timestamp}"
+    final_save_path = os.path.join(save_path, model_name)
+    model.save(final_save_path)
+    print(f"--- [PPO] 模型已保存至: {final_save_path}.zip ---")
+
+    env.close()
 
 
 def SAC_hybrid_test():
@@ -598,13 +700,14 @@ def run_diffusion_sac(config: dict, pretrained_buffer_path: Optional[str] = None
     policy_kwargs = config.get("policy_kwargs", {})
     policy_kwargs["lr_actor_schedule"] = linear_schedule(lr_actor_initial)
     policy_kwargs["lr_critic_schedule"] = linear_schedule(lr_critic_initial)
+    policy_kwargs["optimizer_class "] = AdamW
     qne_k_samples = config.get("qne_k_samples", 8)
     total_timesteps = config.get("total_timesteps", 1_000_000)
     # learning_starts = config.get("learning_starts", 50000)  # 经验回放开始训练的步数
     # 关键修改：如果使用预训练buffer，我们希望Agent立即开始学习
     # 否则，使用配置文件中定义的learning_starts
     learning_starts = (
-        0 if pretrained_buffer_path else config.get("learning_starts", 50000)
+        0 if pretrained_buffer_path else config.get("learning_starts", 10000)
     )
 
     # learning_rate = config.get("learning_rate", 3e-4)
@@ -628,9 +731,9 @@ def run_diffusion_sac(config: dict, pretrained_buffer_path: Optional[str] = None
     )
     # 2.初始化wandb
     wandb.init(
-        project="Diffusion-debug",  # 项目名称（wandb 仪表盘中显示）
+        project="Env-uav-transform",  # 项目名称（wandb 仪表盘中显示）
         name=experiment_name,  # 实验名称（可选）
-        notes="gradien_steps从1->4;学习率减半",  # 实验备注（可选）
+        notes="修改了offloading_ratio的定义",  # 实验备注（可选）
         config={  # 记录超参数（可选）
             # "policy": "MlpPolicy",
             "learning_starts": learning_starts,
@@ -673,12 +776,37 @@ def run_diffusion_sac(config: dict, pretrained_buffer_path: Optional[str] = None
                 f"预训练的经验池文件未找到: {pretrained_buffer_path}"
             )
         model.load_replay_buffer(pretrained_buffer_path)
-        print(f"经验池加载成功! 当前大小: {model.replay_buffer.size()}")
+
+        # --- 这里是修改的部分 ---
+
+        # 1. 获取我们想要记录的信息
+        buffer_size = model.replay_buffer.size()
+
+        # 2. 打印到终端（可以保留，方便偶尔查看）
+        print(f"经验池加载成功! 当前大小: {buffer_size}")
+
+        # 3. 定义日志文件名
+        log_filename = "experiment_log.txt"
+
+        # 4. 获取当前时间，让日志更清晰
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # 5. 准备要写入文件的日志信息
+        log_message = f"[{timestamp}] 经验池加载成功! 当前大小: {buffer_size}\n"
+
+        # 6. 使用 'a' (append) 模式打开文件并写入日志
+        # 'with open(...)' 是一种安全的文件操作方式，可以确保文件被正确关闭
+        try:
+            with open(log_filename, "a", encoding="utf-8") as f:
+                f.write(log_message)
+            print(f"该信息已成功记录到 {log_filename}")
+        except Exception as e:
+            print(f"写入日志文件时发生错误: {e}")
 
     print("--- 开始在您的自定义无人机环境上训练 DiffusionSACAgent ---")
     model.learn(
         total_timesteps=total_timesteps,
-        log_interval=10,
+        log_interval=200,
         callback=metric_callback,
     )
 
@@ -931,6 +1059,7 @@ def test_model():
 
     # 运行N个episodes进行测试
     num_episodes = 5
+    reward_list = []
     for episode in range(num_episodes):
         obs, _ = env.reset()
         done = False
@@ -943,10 +1072,13 @@ def test_model():
             # 若达到步数限制则结束
             if truncated:
                 done = True
+        reward_list.append(total_reward)
         print(f"Episode {episode + 1} finished. Total reward: {total_reward:.2f}")
         env.render()
 
     env.close()
+
+    print(f"all episode complete.The mean reward is {statistics.mean(reward_list)}")
 
 
 def test_diffusion_sac():
@@ -1008,6 +1140,68 @@ def test_diffusion_sac():
     env.close()
 
 
+def test_diffusion_sac_two():
+    import re
+
+    model_dir = os.path.join("models", "Diffusion-SAC-TwoStage")
+    if not os.path.isdir(model_dir):
+        print(f"错误：模型目录 '{model_dir}' 不存在。")
+        return
+
+    # 找到所有符合命名格式的模型文件
+    model_files = [
+        f
+        for f in os.listdir(model_dir)
+        if f.startswith("Diffusion-SAC-TwoStage") and f.endswith(".zip")
+    ]
+    if not model_files:
+        print(f"错误：在目录 '{model_dir}' 中没有找到任何模型文件。")
+        return
+
+    # 从文件名中提取时间戳，选择最新的文件
+    latest_timestamp = -1
+    latest_model_file = ""
+    for filename in model_files:
+        # 示例文件名格式: "Diffusion-SAC-UAV_1751615810.zip"
+        match = re.search(r"Diffusion-SAC-TwoStage_(\d+)\.zip", filename)
+        if match:
+            timestamp = int(match.group(1))
+            if timestamp > latest_timestamp:
+                latest_timestamp = timestamp
+                latest_model_file = filename
+
+    latest_model_path = os.path.join(model_dir, latest_model_file)
+    print(f"加载最新模型：{latest_model_path}")
+
+    # 加载模型
+    model = DiffusionSACAgent.load(latest_model_path)
+
+    # 构造环境：使用 "UAVEnv-v1" 并包装为带 TimeLimit 的环境
+    env = gym.make("UAVEnv-v1", render_mode="human")
+    env = UAVEnvWrapper(env, ue_embedding_dim=8)  # 使用自定义包装器
+    env = TimeLimit(env, max_episode_steps=40)
+
+    num_episodes = 5
+    reward_list = []
+    for episode in range(num_episodes):
+        obs, _ = env.reset()
+        done = False
+        total_reward = 0
+        while not done:
+            # 使用deterministic模式测试
+            action, _ = model.predict(obs, deterministic=True)
+            obs, reward, done, truncated, info = env.step(action)
+            total_reward += reward
+            # 若达到步数限制则结束
+            if truncated:
+                done = True
+        print(f"Episode {episode + 1} finished. Total reward: {total_reward:.2f}")
+        reward_list.append(total_reward)
+        env.render()
+    env.close()
+    print(f"all episode complete.The mean reward is {statistics.mean(reward_list)}")
+
+
 def run_rule_based_agent(num_episodes: int = 5):
     print("--- 正在测试基于规则的智能体 ---")
     # gym.make 会根据注册信息自动应用 TimeLimit 包装器
@@ -1064,8 +1258,8 @@ if __name__ == "__main__":
         "--evaluate",
         type=str,
         default=None,
-        choices=["sac", "diffusion", "both"],
-        help="evaluate trained model: sac, diffusion or both.",
+        choices=["sac", "diffusion", "all", "diffusion-two-stage"],
+        help="evaluate trained model: sac, diffusion,diffusion-two-stage or all.",
     )
     parser.add_argument(
         "--sweep",
@@ -1116,12 +1310,29 @@ if __name__ == "__main__":
 
     # 如果传入 --debug 参数，则直接运行对应的测试函数
     if args.evaluate:
-        if args.evaluate in ["sac", "both"]:
+        if args.evaluate == "sac":
             print("Running test_model...")
             test_model()
-        if args.evaluate in ["diffusion", "both"]:
+        elif args.evaluate == "diffusion":
             print("Running test_diffusion...")
             test_diffusion_sac()
+        elif args.evaluate == "diffusion-two-stage":
+            print("Running test_diffusion_two_stage...")  # 建议修改打印信息以作区分
+            test_diffusion_sac_two()
+        elif args.evaluate == "all":
+            # 在这里定义 'both' 究竟要做什么
+            # 例如，只运行前两个测试
+            print("Running test_model...")
+            test_model()
+            print("Running test_diffusion...")
+            test_diffusion_sac()
+            print("Running test_diffusion_two_stage...")
+            test_diffusion_sac_two()
+
+        else:
+            # (推荐) 处理无效输入
+            print(f"Error: Invalid evaluate option '{args.evaluate}'")
+
         sys.exit(0)
 
     # 原有逻辑：根据 YAML 配置文件运行实验
