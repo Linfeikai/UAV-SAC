@@ -1,12 +1,17 @@
 # from SAC_test.entities.custom_env import CustomEnv
 
+
+# HYDRA: 导入 hydra 和 DictConfig
+import hydra
+from omegaconf import DictConfig, OmegaConf
+
 # from custom_components.hybrid_sac_agent import HybridSAC
 from diffusion_sac.diffusion_sac_agent import DiffusionSACAgent
 import gymnasium as gym
 from gymnasium.wrappers import TimeLimit
 from gymnasium.envs.registration import register
 from stable_baselines3.common.env_checker import check_env
-from stable_baselines3 import SAC, TD3, PPO
+from stable_baselines3 import SAC, TD3, PPO, DDPG
 from stable_baselines3.common.callbacks import (
     BaseCallback,
     CallbackList,
@@ -33,6 +38,7 @@ from torch.optim import Adam
 
 import pandas as pd  # Optional, but helpful
 import os
+os.environ["WANDB_MODE"]="offline"
 import torch as th
 import sys
 import numpy as np
@@ -41,7 +47,7 @@ from typing import Dict, List, Optional, Tuple
 from gymnasium.wrappers import TimeLimit
 import warnings
 import statistics
-
+import time
 # import swanlab
 
 # swanlab.sync_wandb()
@@ -51,7 +57,7 @@ import statistics
 
 
 # 固定随机种子
-SEED = 42
+SEED = 408
 
 
 register(
@@ -66,13 +72,12 @@ register(
 )
 # 1. 定义两个不同的初始学习率
 # Actor可以快一点，因为它需要探索。Critic必须稳，所以让它慢得多。
-lr_actor_initial = 5e-5  # 保持原来的值
-lr_critic_initial = 1.5e-4  # 升高一个数量级
-lr_final = 1e-6  # 最终学习率
 
 
 # 2. 为它们分别创建衰减函数
-def linear_schedule(initial_value: float, final_value: float = lr_final):
+def linear_schedule(initial_value: float, final_value: float ):
+    print(type(initial_value))
+    print(type(final_value))
     # 确保初始值不小于最终值
     assert initial_value >= final_value, "初始学习率必须大于或等于最终学习率"
 
@@ -82,14 +87,8 @@ def linear_schedule(initial_value: float, final_value: float = lr_final):
     return func
 
 
-lr_actor_schedule = linear_schedule(lr_actor_initial)
-lr_critic_schedule = linear_schedule(lr_critic_initial)
 
-# 3.打包进policy_kwargs
-policy_kwargs = {
-    "lr_actor_schedule": lr_actor_schedule,
-    "lr_critic_schedule": lr_critic_schedule,
-}
+
 
 import numpy as np
 import wandb
@@ -331,7 +330,9 @@ class SACWrapper(gym.Wrapper):
 # =====================================================================================
 # 新增函数: 两阶段训练法 - 阶段一
 # =====================================================================================
-def collect_teacher_buffer(config: dict, buffer_save_path: str) -> None:
+def collect_teacher_buffer(
+    config: DictConfig, buffer_save_path: str, seed: int, ue_num: int,wrapper_kwargs: dict
+) -> None:
     """
     【单环境修正版】
     使用标准的SAC Agent（老师）在单个、非并行的环境中训练，以填充Replay Buffer。
@@ -341,16 +342,6 @@ def collect_teacher_buffer(config: dict, buffer_save_path: str) -> None:
     # (这部分参数获取逻辑保持不变)
     learning_rate = config.get("learning_rate", 3e-4)
     buffer_size = config.get("buffer_size", 1_000_000)
-    student_config = None
-    for exp in all_experiments:
-        if exp.get("teacher_config_name") == config["experiment_name"]:
-            student_config = exp
-            break
-    if not student_config:
-        wrapper_kwargs = {"ue_embedding_dim": 8}
-        print("警告：无法在学生配置中找到wrapper_kwargs，将使用默认值。")
-    else:
-        wrapper_kwargs = student_config.get("wrapper_kwargs", {"ue_embedding_dim": 8})
     n_envs = 4  # <--- 定义并行数
     original_timesteps = config.get("total_timesteps", 100000)
 
@@ -365,9 +356,10 @@ def collect_teacher_buffer(config: dict, buffer_save_path: str) -> None:
         "UAVEnv-v1",
         n_envs=n_envs,
         vec_env_cls=SubprocVecEnv,
-        seed=SEED,
+        seed=seed,
         wrapper_class=UAVEnvWrapper,
         wrapper_kwargs=wrapper_kwargs,
+        env_kwargs={"ue_num": ue_num},
     )
 
     # 初始化标准的SAC模型作为“老师”
@@ -396,297 +388,186 @@ def collect_teacher_buffer(config: dict, buffer_save_path: str) -> None:
     del teacher_agent
 
 
-def run_experiment(config: dict):
+def run_experiment(config: dict, seed: int, ue_num: int):
     """
-    根据给定的配置字典，运行单个实验。
+    根据给定的配置字典和种子，运行单个实验。
 
     Args:
         config (dict): 包含单个实验所有参数的字典。
+        seed (int): 用于本次实验的随机种子。
+        ue(int)：本次实验的UE数量
     """
-    print(f"--- Running Experiment: {config['experiment_name']} ---")
 
-    agent_type = config.get("agent_type")  # 这里的config就是yaml文件里的一个元素
+    agent_type = config.get("agent_type")
 
-    if agent_type == "rule_based":
-        num_episodes = config.get("num_episodes", 5)
+    # --- 使用字典映射代替 if-elif ---
+    AGENT_RUNNERS = {
+        "sac": run_vanilla_sac,
+        "ppo": run_ppo,
+        "ddpg": run_ddpg,
+        # 其他标准的agent也可以加在这里
+    }
+
+    if agent_type in AGENT_RUNNERS:
+        runner = AGENT_RUNNERS[agent_type]
+        runner(config, seed, ue_num)
+
+    elif agent_type == "rule_based":
         print("Running Rule-Based Agent...")
-        # 这里你需要调用一个函数来运行你的规则智能体并评估它
-        run_rule_based_agent(num_episodes)  # 这是一个示例调用
+        run_rule_based_agent(config.get("num_episodes", 5))
         print("Rule-Based Agent finished.")
-        return  # 基准测试运行完后直接返回
 
-    elif agent_type == "sac":
-        run_vanilla_sac(config)  # 直接运行SAC的测试函数
-    elif agent_type == "ppo":
-        run_ppo(config)
     elif agent_type == "diffusion_sac":
-        # =====================================================================================
-        # 修改: 检查是否启用两阶段训练
-        # =====================================================================================
-        # 我们约定，如果在diffusion_sac的配置中加入了"two_stage_training": true
-        # 并且定义了 "teacher_config_name"，那么就启用两阶段训练
+        # Diffusion SAC 的两阶段逻辑比较特殊，可以单独处理
         if config.get("two_stage_training", False):
             print("检测到启用两阶段训练模式...")
-            teacher_config_name = config.get("teacher_config_name")
-            if not teacher_config_name:
-                raise ValueError("两阶段训练模式需要指定 'teacher_config_name'！")
-
-            # 在所有实验配置中找到老师的配置
-            teacher_config = None
-            for exp in all_experiments:  # `all_experiments` 需在主逻辑中可访问
-                if exp["experiment_name"] == teacher_config_name:
-                    teacher_config = exp
-                    break
+            # 直接从配置中获取老师的配置对象，不再需要名字
+            teacher_config = config.get("teacher_config") 
             if not teacher_config:
-                raise ValueError(f"找不到名为 '{teacher_config_name}' 的老师配置！")
+                # 使用 OmegaConf.select() 可以安全地访问，即使键不存在也不会报错
+                raise ValueError("两阶段训练模式需要一个 'teacher_config' 配置块！")
+            wrapper_kwargs_for_teacher = config.get("wrapper_kwargs", {}) # 从学生配置里拿
 
             # 定义预训练buffer的保存路径
-            buffer_path = os.path.join("buffers", f"{teacher_config_name}_buffer.pkl")
+            buffer_name = f"teacher_buffer_ue{ue_num}_seed{seed}_buffer.pkl"
+            buffer_path = os.path.join("buffers", buffer_name)
             os.makedirs("buffers", exist_ok=True)
 
             # 阶段一：运行老师SAC来收集数据并保存buffer
-            collect_teacher_buffer(teacher_config, buffer_path)
+            collect_teacher_buffer(teacher_config, buffer_path, seed, ue_num,wrapper_kwargs_for_teacher)
 
             # 阶段二：运行Diffusion SAC，并加载预训练的buffer
-            run_diffusion_sac(config, pretrained_buffer_path=buffer_path)
+            run_diffusion_sac(
+                config, seed, pretrained_buffer_path=buffer_path, ue_num=ue_num
+            )
         else:
             # 如果不启用，则正常运行
-            run_diffusion_sac(config)
-    # 在这里可以添加你自己改进的SAC算法的逻辑
-    # elif agent_type == "my_sac_v1":
-    #     model = MySACv1(...) # 使用你的自定义参数
-
+            run_diffusion_sac(config, seed, ue_num=ue_num)
     else:
         raise ValueError(f"Unknown agent_type: {agent_type}")
 
 
-def run_vanilla_sac(config: dict):
-    # 从配置中获取环境和超参数
-    experiment_name = config.get("experiment_name", "Vanilla-SAC")
-    learning_rate = config.get("learning_rate", 3e-4)
-    total_timesteps = config.get("total_timesteps", 100000)
-    gamma = config.get("gamma", 0.99)
-    batch_size = config.get("batch_size", 256)
-    tau = config.get("tau", 0.005)
-    buffer_size = config.get("buffer_size", 1_000_000)
-
-    # 使用的是纯连续的环境v0
-    env1 = make_vec_env(
-        "UAVEnv-v1",
-        n_envs=4,
-        vec_env_cls=SubprocVecEnv,  # 使用SubprocVecEnv来真正利用多核CPU
-        seed=SEED,  # 设置随机种子以确保可重复性
-        wrapper_class=SACWrapper,  # 使用SAC专用的包装器
-    )
-    log_path = os.path.join("logs", experiment_name)
-    save_path = os.path.join("models", experiment_name)
-    os.makedirs(log_path, exist_ok=True)  # 确保日志目录存在
-    os.makedirs(save_path, exist_ok=True)  # 确保模型保存目录存在
-
-    wandb.init(
-        project="Env-uav-transform",  # 项目名称（wandb 仪表盘中显示）
-        name=experiment_name,  # 实验名称（可选）
-        notes="修改了offloading_ratio的定义",  # 实验备注（可选）
-        # config={  # 记录超参数（可选）
-        #     # "policy": "MlpPolicy",
-        #     "total_timesteps": 100000,
-        #     # "fairness_penalty_weight": 10.0,  # 公平性惩罚权重
-        # },
-        sync_tensorboard=True,  # auto-upload sb3's tensorboard metrics
-    )
-
-    metric_callback = ParallelEpisodeMetricCallback(verbose=1)
-
-    # env1._get_obs()
-    # check_env(env1.unwrapped, skip_render_check=True)
-    # 初始化 SAC 模型
-    model = SAC(
-        "MlpPolicy",  # 使用多层感知机策略
-        env1,
-        verbose=1,  # 打印训练日志
-        tensorboard_log=log_path,  # 保存日志用于TensorBoard可视化
-        gamma=gamma,  # 折扣因子
-        batch_size=batch_size,  # 经验回放的批量大小
-        learning_rate=learning_rate,  # 学习率
-        buffer_size=buffer_size,  # 经验回放的缓冲区大小
-        tau=tau,  # 软更新参数
-    )
-
-    # 训练模型（带进度条）
-    model.learn(
-        total_timesteps=total_timesteps,
-        callback=metric_callback,  # 显示进度条
-        log_interval=10,  # 每10步打印一次日志
-    )
-    wandb.finish()
-
-    # 保存模型
-
-    import time
-
-    # 确保目标文件夹存在
-    timestamp = int(time.time())
-    model_name = f"{experiment_name}_{timestamp}"
-    model.save(os.path.join(save_path, model_name))
-
-
-def run_ppo(config: dict):
+def train_agent(
+    agent_class,  # 传入Agent类，如 SAC, PPO
+    config: dict,
+    seed: int,
+    ue_num: int,
+):
     """
-    根据给定的配置，运行 PPO 实验。
+    一个通用的函数，负责处理所有Agent共享的训练流程。
     """
-    print(f"\n--- [PPO 模式] 开始: {config.get('experiment_name', 'PPO-Default')} ---")
+    # === [核心修改 1/3] ===
+    # 从配置中获取基础名称，并创建一个本次运行的唯一名称
+    base_experiment_name = config.get("agent_type", "default_agent") # 使用 agent_type 代替
+    unique_experiment_name = f"{base_experiment_name}_ue{ue_num}_seed{seed}"
+    print(f"\n{'='*50}\n--- Running: {unique_experiment_name} ---\n{'='*50}")
 
-    # 1. 从配置中获取超参数，如果未提供则使用 PPO 的常见默认值
-    experiment_name = config.get("experiment_name", "PPO-UAV")
-    total_timesteps = config.get("total_timesteps", 100000)
-    n_envs = config.get("n_envs", 4)
+    total_timesteps = config["total_timesteps"]
+    n_envs = config.get("n_envs", 4)  # PPO可能需要，其他agent也可以用
 
-    # PPO 核心超参数
-    learning_rate = config.get("learning_rate", 3e-4)
-    n_steps = config.get("n_steps", 2048)  # PPO 单次数据收集的步数，非常关键
-    batch_size = config.get("batch_size", 64)  # mini-batch size
-    n_epochs = config.get("n_epochs", 10)  # 每次更新策略的 epoch 数
-    gamma = config.get("gamma", 0.99)
-    gae_lambda = config.get("gae_lambda", 0.95)
-    clip_range = config.get("clip_range", 0.2)
-
-    # 环境包装器参数
-    wrapper_kwargs = config.get("wrapper_kwargs", {"ue_embedding_dim": 8})
-
-    # 2. 设置日志和模型保存路径
-    log_path = os.path.join("logs", experiment_name)
-    save_path = os.path.join("models", experiment_name)
+    # --- 1. 设置路径 (公共逻辑) ---
+    # --- 1. 设置路径 (使用基础名称作为主目录) ---
+    log_path = os.path.join("logs", unique_experiment_name) # 日志用唯一名称
+    save_path = os.path.join("models", base_experiment_name) # 模型保存在基础名称目录下
     os.makedirs(log_path, exist_ok=True)
     os.makedirs(save_path, exist_ok=True)
 
-    # 3. 初始化 Wandb
+    # === [核心修改 2/3] ===
+    # --- 2. 初始化 Wandb (使用唯一名称) ---
     wandb.init(
-        project="Env-uav-transform",  # 您可以为 PPO 实验指定一个新的项目名
-        name=experiment_name,
-        notes=config.get("notes", "Standard PPO run on UAVEnv-v1"),
-        config=config,  # 将整个配置字典上传到 wandb，方便追溯
+        project="comparison-exp",
+        name=unique_experiment_name, # <--- 在这里使用唯一名称
+        notes=f"seed={seed}, ue_num={ue_num}",
+        config=config,
         sync_tensorboard=True,
     )
 
-    # 4. 创建并行化的、被包装过的环境
-    # 对于 PPO 这种需要连续动作空间的 Agent，UAVEnvWrapper 是一个很好的选择
+
+    # --- 3. 创建环境 (公共逻辑) ---
+    # 注意：这里假设了SAC和DDPG使用SACWrapper，PPO使用UAVEnvWrapper
+    # 可以通过config来使其更灵活
+    wrapper_map = {"SAC": SACWrapper, "DDPG": SACWrapper, "PPO": UAVEnvWrapper}
+    wrapper_class = wrapper_map.get(agent_class.__name__, UAVEnvWrapper)
+
     env = make_vec_env(
         "UAVEnv-v1",
         n_envs=n_envs,
         vec_env_cls=SubprocVecEnv,
-        seed=SEED,
-        wrapper_class=UAVEnvWrapper,
-        wrapper_kwargs=wrapper_kwargs,
+        seed=seed,
+        wrapper_class=wrapper_class,
+        env_kwargs={"ue_num": ue_num},
     )
 
-    # 5. 初始化回调函数
-    metric_callback = ParallelEpisodeMetricCallback(verbose=1)
+    # --- 4. 提取模型超参数 ---
+    # 从config中提取所有可能用于模型初始化的参数
+    # SB3的构造函数会自动忽略不相关的参数，非常方便
+    model_kwargs = config.copy()
+    model_kwargs.pop("experiment_name", None)
+    model_kwargs.pop("agent_type", None)
+    model_kwargs.pop("total_timesteps", None)
+    model_kwargs.pop("n_envs", None) 
 
-    # 6. 初始化 PPO 模型
-    model = PPO(
+    # --- 5. 初始化并训练模型 (核心部分) ---
+    model = agent_class(
         "MlpPolicy",
         env,
-        learning_rate=learning_rate,
-        n_steps=n_steps,
-        batch_size=batch_size,
-        n_epochs=n_epochs,
-        gamma=gamma,
-        gae_lambda=gae_lambda,
-        clip_range=clip_range,
         verbose=1,
         tensorboard_log=log_path,
-        seed=SEED,
+        seed=seed,
+        **model_kwargs,  # 将所有超参数一次性传入
     )
 
-    # 7. 训练模型
-    print(f"--- [PPO] 开始训练, 总步数: {total_timesteps} ---")
+    print(f"--- [{agent_class.__name__}] 开始训练, 总步数: {total_timesteps} ---")
     model.learn(
         total_timesteps=total_timesteps,
-        callback=metric_callback,
-        log_interval=10,  # 和您的 SAC 设置保持一致
+        callback=ParallelEpisodeMetricCallback(verbose=1),  # 假设回调是通用的
+        log_interval=10,
     )
-    print("--- [PPO] 训练完成 ---")
+    print(f"--- [{agent_class.__name__}] 训练完成 ---")
 
-    # 8. 结束 Wandb run
+    # --- 6. 清理和保存 (公共逻辑) ---
     wandb.finish()
 
-    # 9. 保存最终模型
-    import time
-
+    # === [核心修改 3/3] ===
+    # --- 6. 清理和保存 (使用唯一名称命名模型文件) ---
     timestamp = int(time.time())
-    model_name = f"{experiment_name}_{timestamp}"
+    # 模型文件名包含所有关键信息
+    model_name = f"{base_experiment_name}_ue{ue_num}_seed{seed}_{timestamp}.zip"
     final_save_path = os.path.join(save_path, model_name)
     model.save(final_save_path)
-    print(f"--- [PPO] 模型已保存至: {final_save_path}.zip ---")
+    print(f"--- [{agent_class.__name__}] 模型已保存至: {final_save_path} ---")
 
     env.close()
 
 
-def SAC_hybrid_test():
-    env1 = make_vec_env(
-        "UAVEnv-v1",
-        n_envs=8,
-        vec_env_cls=SubprocVecEnv,  # 使用SubprocVecEnv来真正利用多核CPU
-        seed=SEED,  # 设置随机种子以确保可重复性
-    )
-    # env1.reset(seed=SEED)  # 设置随机种子以确保可重复性
-    log_dir = os.path.join("hybridSAC_v3_model", "logs")
-    os.makedirs(log_dir, exist_ok=True)  # 确保日志目录存在
-    # 初始化 WandB
-    wandb.init(
-        project="UAV-SAC_1",  # 项目名称（wandb 仪表盘中显示）
-        name="SAC-multiCritic-autodl",  # 实验名称（可选）
-        config={  # 记录超参数（可选）
-            "policy": "MlpPolicy",
-            "total_timesteps": 100000,
-        },
-        sync_tensorboard=True,  # auto-upload sb3's tensorboard metrics
-    )
-
-    metric_callback = ParallelEpisodeMetricCallback(verbose=1)
-    # swanlab_callback = SwanLabCallback(
-    #     project="UAV-SAC_1",  # 项目名称（wandb 仪表盘中显示）
-    #     experiment_name="multi-environment",  # 实验名称（可选）
-    #     verbose=1,  # 打印训练日志
-    #     tensorboard_log=log_dir,  # 保存日志用于TensorBoard可视化
-    # )
-    # callbacklist = CallbackList([metric_callback, swanlab_callback])
-    model = HybridSAC(
-        "HybridSACPolicy",  # 使用自己定义的策略
-        env1,
-        verbose=1,  # 打印训练日志
-        tensorboard_log=log_dir,  # 保存日志用于TensorBoard可视化
-        gamma=0.99,  # 折扣因子 # 其实也是默认值
-        batch_size=256,  # 经验回放的批量大小 #默认值
-        learning_rate=3e-4,  # 学习率 #默认值
-        buffer_size=1_000_000,  # 经验回放的缓冲区大小  #默认值
-        tau=0.005,  # 软更新参数 #默认值
-        ent_coef=0.1,  # 自动调整熵系数
-        device="cuda",
-        policy_kwargs=policy_kwargs,  # 使用自定义的学习率调度器
-    )
-    model.learn(
-        total_timesteps=100000,
-        callback=metric_callback,  # 显示进度条
-        log_interval=10,  # 每10步打印一次日志
-    )
-    # swanlab.finish()
-    import time
-
-    # 确保目标文件夹存在
-    timestamp = int(time.time())
-    save_dir = os.path.join("hybridSAC_v3_model", "models")
-    os.makedirs(save_dir, exist_ok=True)
-    model.save(os.path.join(save_dir, f"hybrid_sac_model_{timestamp}"))
+def run_vanilla_sac(config: dict, seed: int, ue_num: int):
+    train_agent(SAC, config, seed, ue_num)
 
 
-def run_diffusion_sac(config: dict, pretrained_buffer_path: Optional[str] = None):
+def run_ppo(config: dict, seed: int, ue_num: int):
+    # 注意：PPO的环境创建可能需要不同的wrapper或参数，
+    # 可以在通用函数中增加逻辑，或在这里单独处理环境创建
+    train_agent(PPO, config, seed, ue_num)
+
+
+def run_ddpg(config: dict, seed: int, ue_num: int):
+    train_agent(DDPG, config, seed, ue_num)
+
+
+def run_diffusion_sac(
+    config: dict,
+    seed: int,
+    pretrained_buffer_path: Optional[str] = None,
+    ue_num: int = 20,
+):
     """
     运行Diffusion SAC实验。
 
     Args:
         config (dict): Diffusion SAC的配置字典。
+        seed:随机种子
         pretrained_buffer_path (Optional[str]): 如果提供，则从该路径加载预训练的Replay Buffer。
+        ue_num：本次训练环境的设备数量
     """
 
     # 要创建的并行环境数量
@@ -694,13 +575,22 @@ def run_diffusion_sac(config: dict, pretrained_buffer_path: Optional[str] = None
 
     # Wrapper 和 Policy 的参数
     # 注意：wrapper_kwargs 是用来传递给 Wrapper 的构造函数的
-    experiment_name = config.get("experiment_name", "Diffusion-SAC-UAV")
+    # === [核心修改 1/3] ===
+    base_experiment_name = config.get("agent_type", "Diffusion-SAC-UAV") # 使用 agent_type 代替
+    unique_experiment_name = f"{base_experiment_name}_ue{ue_num}_seed{seed}"
+    print(f"\n{'='*50}\n--- Running: {unique_experiment_name} ---\n{'='*50}")
 
     wrapper_kwargs = config.get("wrapper_kwargs", {})
-    policy_kwargs = config.get("policy_kwargs", {})
-    policy_kwargs["lr_actor_schedule"] = linear_schedule(lr_actor_initial)
-    policy_kwargs["lr_critic_schedule"] = linear_schedule(lr_critic_initial)
-    policy_kwargs["optimizer_class "] = AdamW
+    policy_kwargs = OmegaConf.to_container(config.get("policy_kwargs", {}), resolve=True)
+    lr_actor_initial = config.get("lr_actor_initial",5e-5)
+    lr_critic_initial = config.get('lr_critic_initial',1.5e-4)
+    lr_final = config.get('lr_final',1e-6)
+    print(f'Now i have lr actor {lr_actor_initial},its type is {type(lr_actor_initial)}')
+    print(f'Now i have lr critic {lr_critic_initial},its type is {type(lr_critic_initial)}')
+
+    policy_kwargs["lr_actor_schedule"] = linear_schedule(lr_actor_initial,lr_final)
+    policy_kwargs["lr_critic_schedule"] = linear_schedule(lr_critic_initial,lr_final)
+    # policy_kwargs["optimizer_class "] = AdamW
     qne_k_samples = config.get("qne_k_samples", 8)
     total_timesteps = config.get("total_timesteps", 1_000_000)
     # learning_starts = config.get("learning_starts", 50000)  # 经验回放开始训练的步数
@@ -715,10 +605,11 @@ def run_diffusion_sac(config: dict, pretrained_buffer_path: Optional[str] = None
         "qne_temperature", 5.0
     )  # QNE的温度参数，用于控制Softmax的平滑度
     # 保存log和model的路径
-    log_path = os.path.join("logs", experiment_name)
-    save_path = os.path.join("models", experiment_name)
-    os.makedirs(log_path, exist_ok=True)  # 确保日志目录存在
-    os.makedirs(save_path, exist_ok=True)  # 确保模型保存目录存在
+    # --- 设置路径 ---
+    log_path = os.path.join("logs", unique_experiment_name)
+    save_path = os.path.join("models", base_experiment_name)
+    os.makedirs(log_path, exist_ok=True)
+    os.makedirs(save_path, exist_ok=True)
 
     # 1. 创建您的原始无人机环境
     env = make_vec_env(
@@ -727,13 +618,14 @@ def run_diffusion_sac(config: dict, pretrained_buffer_path: Optional[str] = None
         wrapper_class=UAVEnvWrapper,  # 使用自定义的包装器
         # wrapper_kwargs=wrapper_kwargs,  # 传递包装器参数
         vec_env_cls=SubprocVecEnv,  # 使用SubprocVecEnv来真正利用多核CPU
-        seed=SEED,  # 设置随机种子以确保可重复性
+        seed=seed,  # 设置随机种子以确保可重复性
+        env_kwargs={"ue_num": ue_num},
     )
     # 2.初始化wandb
     wandb.init(
-        project="Env-uav-transform",  # 项目名称（wandb 仪表盘中显示）
-        name=experiment_name,  # 实验名称（可选）
-        notes="修改了offloading_ratio的定义",  # 实验备注（可选）
+        project="comparison-exp",  # 项目名称（wandb 仪表盘中显示）
+        name=unique_experiment_name, # <--- 在这里使用唯一名称
+        notes=f"seed={seed}, ue_num={ue_num}",
         config={  # 记录超参数（可选）
             # "policy": "MlpPolicy",
             "learning_starts": learning_starts,
@@ -806,7 +698,7 @@ def run_diffusion_sac(config: dict, pretrained_buffer_path: Optional[str] = None
     print("--- 开始在您的自定义无人机环境上训练 DiffusionSACAgent ---")
     model.learn(
         total_timesteps=total_timesteps,
-        log_interval=200,
+        log_interval=10,
         callback=metric_callback,
     )
 
@@ -814,8 +706,10 @@ def run_diffusion_sac(config: dict, pretrained_buffer_path: Optional[str] = None
 
     # 确保目标文件夹存在
     timestamp = int(time.time())
-    model_name = f"{experiment_name}_{timestamp}"
-    model.save(os.path.join(save_path, model_name))
+    model_name = f"{base_experiment_name}_ue{ue_num}_seed{seed}_{timestamp}.zip"
+    final_save_path = os.path.join(save_path, model_name)
+    model.save(final_save_path)
+    print(f"--- [DiffusionSAC] 模型已保存至: {final_save_path} ---")
 
 
 def find_best_hyperparameters_sweep():
@@ -1235,129 +1129,132 @@ def run_rule_based_agent(num_episodes: int = 5):
     env.close()
 
 
-if __name__ == "__main__":
-    # 1. 创建一个命令行参数解析器
-    parser = argparse.ArgumentParser(
-        description="Run RL experiments based on a YAML config file."
+def SAC_hybrid_test():
+    env1 = make_vec_env(
+        "UAVEnv-v1",
+        n_envs=8,
+        vec_env_cls=SubprocVecEnv,  # 使用SubprocVecEnv来真正利用多核CPU
+        seed=SEED,  # 设置随机种子以确保可重复性
+    )
+    # env1.reset(seed=SEED)  # 设置随机种子以确保可重复性
+    log_dir = os.path.join("hybridSAC_v3_model", "logs")
+    os.makedirs(log_dir, exist_ok=True)  # 确保日志目录存在
+    # 初始化 WandB
+    wandb.init(
+        project="UAV-SAC_1",  # 项目名称（wandb 仪表盘中显示）
+        name="SAC-multiCritic-autodl",  # 实验名称（可选）
+        config={  # 记录超参数（可选）
+            "policy": "MlpPolicy",
+            "total_timesteps": 100000,
+        },
+        sync_tensorboard=True,  # auto-upload sb3's tensorboard metrics
     )
 
-    # 2. 添加我们需要的命令行参数
-    parser.add_argument(
-        "--config",
-        type=str,
-        # required=True,
-        help="Path to the experiment configuration YAML file (e.g., experiments.yaml)",
+    metric_callback = ParallelEpisodeMetricCallback(verbose=1)
+    # swanlab_callback = SwanLabCallback(
+    #     project="UAV-SAC_1",  # 项目名称（wandb 仪表盘中显示）
+    #     experiment_name="multi-environment",  # 实验名称（可选）
+    #     verbose=1,  # 打印训练日志
+    #     tensorboard_log=log_dir,  # 保存日志用于TensorBoard可视化
+    # )
+    # callbacklist = CallbackList([metric_callback, swanlab_callback])
+    model = HybridSAC(
+        "HybridSACPolicy",  # 使用自己定义的策略
+        env1,
+        verbose=1,  # 打印训练日志
+        tensorboard_log=log_dir,  # 保存日志用于TensorBoard可视化
+        gamma=0.99,  # 折扣因子 # 其实也是默认值
+        batch_size=256,  # 经验回放的批量大小 #默认值
+        learning_rate=3e-4,  # 学习率 #默认值
+        buffer_size=1_000_000,  # 经验回放的缓冲区大小  #默认值
+        tau=0.005,  # 软更新参数 #默认值
+        ent_coef=0.1,  # 自动调整熵系数
+        device="cuda",
+        policy_kwargs=policy_kwargs,  # 使用自定义的学习率调度器
     )
-    parser.add_argument(
-        "--name",
-        type=str,
-        # required=True,
-        help="The 'experiment_name' from the config file to run.",
+    model.learn(
+        total_timesteps=100000,
+        callback=metric_callback,  # 显示进度条
+        log_interval=10,  # 每10步打印一次日志
     )
-    parser.add_argument(
-        "--evaluate",
-        type=str,
-        default=None,
-        choices=["sac", "diffusion", "all", "diffusion-two-stage"],
-        help="evaluate trained model: sac, diffusion,diffusion-two-stage or all.",
-    )
-    parser.add_argument(
-        "--sweep",
-        type=str,
-        default=None,
-        help="Run a Wandb sweep. Use '--sweep new' to start a new one, or '--sweep <SWEEP_ID>' to resume an existing one.",
-    )
-    parser.add_argument(
-        "--count",
-        type=int,
-        default=5,  # 默认运行5次实验
-        help="Number of runs to execute in the sweep.",
-    )
+    # swanlab.finish()
+    import time
 
-    # 3. 解析传入的参数
-    args = parser.parse_args()
-    # ================= 优先处理Sweep逻辑 =================
-    if args.sweep:
+    # 确保目标文件夹存在
+    timestamp = int(time.time())
+    save_dir = os.path.join("hybridSAC_v3_model", "models")
+    os.makedirs(save_dir, exist_ok=True)
+    model.save(os.path.join(save_dir, f"hybrid_sac_model_{timestamp}"))
+
+
+
+# HYDRA: 这是新的程序入口。Hydra 会自动调用这个函数。
+@hydra.main(version_base=None, config_path="conf", config_name="config")
+def main(cfg: DictConfig) -> None:
+    """
+    Hydra 会自动解析配置文件和命令行参数，
+    并将最终合并后的配置作为 `cfg` 对象传入此函数。
+    """
+    # --- HYDRA: 打印最终配置，非常便于调试 ---
+    print("--- Hydra Configuration ---")
+    print(OmegaConf.to_yaml(cfg))
+    print("--------------------------")
+
+    # --- HYDRA: 替换 --sweep 逻辑 ---
+    if cfg.sweep:
         sweep_id = None
-        project_name = "SAC-find_out-sweep"  # 定义你的sweep项目名称
+        project_name = "SAC-find_out-sweep"
 
-        if args.sweep == "new":
+        if cfg.sweep == "new":
             print("--- 启动一个新的 Wandb Sweep ---")
-            # 如果没有提供sweep_id，就创建一个新的
-            sweep_config = (
-                get_sweep_config()
-            )  # 确保 get_sweep_config() 函数在之前已经定义好
+            sweep_config = get_sweep_config()
             sweep_id = wandb.sweep(sweep=sweep_config, project=project_name)
             print(f"新的 Sweep 已创建, ID: {sweep_id}")
         else:
-            # 如果提供了值，且不是'new'，我们就认为它是一个sweep_id
-            sweep_id = args.sweep
+            sweep_id = cfg.sweep
             print(f"--- 继续已有的 Sweep, ID: {sweep_id} ---")
 
-        # 使用获取到的 sweep_id 启动 agent
-        # 确保 train_for_sweep() 函数也已经定义好
-        print(f"启动 Agent, 将执行 {args.count} 次实验...")
+        print(f"启动 Agent, 将执行 {cfg.count} 次实验...")
         wandb.agent(
             sweep_id,
             function=train_for_sweep,
-            count=args.count,
-            project=project_name,  # 明确指定项目，避免混淆
+            count=cfg.count,
+            project=project_name,
         )
-        sys.exit(0)  # Sweep结束后正常退出脚本
-    # ======================================================
+        return # Sweep结束后直接退出
 
-    # ======================================================
-
-    # 如果传入 --debug 参数，则直接运行对应的测试函数
-    if args.evaluate:
-        if args.evaluate == "sac":
+    # --- HYDRA: 替换 --evaluate 逻辑 ---
+    if cfg.evaluate:
+        if cfg.evaluate == "sac":
             print("Running test_model...")
             test_model()
-        elif args.evaluate == "diffusion":
+        elif cfg.evaluate == "diffusion":
             print("Running test_diffusion...")
             test_diffusion_sac()
-        elif args.evaluate == "diffusion-two-stage":
-            print("Running test_diffusion_two_stage...")  # 建议修改打印信息以作区分
+        elif cfg.evaluate == "diffusion-two-stage":
+            print("Running test_diffusion_two_stage...")
             test_diffusion_sac_two()
-        elif args.evaluate == "all":
-            # 在这里定义 'both' 究竟要做什么
-            # 例如，只运行前两个测试
+        elif cfg.evaluate == "all":
             print("Running test_model...")
             test_model()
             print("Running test_diffusion...")
             test_diffusion_sac()
             print("Running test_diffusion_two_stage...")
             test_diffusion_sac_two()
-
         else:
-            # (推荐) 处理无效输入
-            print(f"Error: Invalid evaluate option '{args.evaluate}'")
+            print(f"Error: Invalid evaluate option '{cfg.evaluate}'")
+        return # 评估结束后直接退出
 
-        sys.exit(0)
+    # --- HYDRA: 运行主实验逻辑 ---
+    # `cfg.experiment` 包含了从 conf/experiment/ 目录加载的实验配置
+    # `cfg.seed` 和 `cfg.ue` 来自主 config.yaml 或命令行覆盖
 
-    # 原有逻辑：根据 YAML 配置文件运行实验
-    if not args.config or not args.name:
-        parser.print_help()
-        sys.exit(1)
-    try:
-        with open(args.config, "r", encoding="utf-8") as f:
-            all_experiments = yaml.safe_load(f)
-    except FileNotFoundError:
-        print(f"Error: Config file not found at {args.config}")
-        sys.exit(1)
+    run_experiment(cfg.experiment, cfg.seed, cfg.ue)
 
-    # 5. 查找与传入的 --name 匹配的实验配置
-    experiment_config = None
-    for exp in all_experiments:
-        if (
-            exp["experiment_name"] == args.name
-        ):  # 匹配命令行输入的--name 也就是args.name是否和yaml文件里哪个exp的experiment_name一致
-            experiment_config = exp
-            break
 
-    # 6. 如果找到了配置，就运行实验
-    if experiment_config:
-        run_experiment(experiment_config)
-    else:
-        print(f"Error: Experiment with name '{args.name}' not found in {args.config}")
-        sys.exit(1)
+
+
+if __name__ == "__main__":
+    # 1. 创建一个命令行参数解析器
+    main()
+ 
