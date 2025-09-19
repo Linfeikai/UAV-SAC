@@ -80,10 +80,9 @@ class CustomEnv(gym.Env):
         "moderate": 0.3,
         "hpc": 0.1,
     }
-    ue_num = 20  # UE设备的数量：20
     s = 1000  # 单位bit处理所需cpu圈数1000
 
-    state_dim = 108  # 状态空间维度 # 距离border，距离充电器，dx,dy,speed,电量+80=86 +20个历史service_count = 106+上一step的速度、方向
+    # state_dim = 108  # 状态空间维度 # 距离border，距离充电器，dx,dy,speed,电量+80=86 +20个历史service_count = 106+上一step的速度、方向
     action_dim = 4
     max_action = (-1, 1)
 
@@ -103,9 +102,15 @@ class CustomEnv(gym.Env):
     slot_num = int(T / delta_t)  # 40个间隔
 
     def __init__(
-        self, render_mode=None
+        self,
+        render_mode=None,
+        ue_num=20,  # <--- 添加 ue_num 参数
     ):  # 离散值：选择ue；连续值：距离，方向，卸载比率
         super(CustomEnv, self).__init__()
+
+        # 使用传入的参数：
+        self.ue_num = ue_num  # 将参数保存为实例属性
+        self.state_dim = 8 + 5 * self.ue_num
 
         # 1. 离散部分：选择要服务的UE，范围是 [0, ue_num-1]
         self.discrete_action_space = spaces.Discrete(self.ue_num)
@@ -613,7 +618,7 @@ class CustomEnv(gym.Env):
         # 8.看是否终止？
         if not terminated:
             terminated = self.checkfailure()  # 检查是否还有其他原因导致终止
-        truncated = False  # 假设我们没有因为步数限制而截断
+        truncated = self.current_step >= self.slot_num
         if terminated and self.uav.e_battery <= 1e-6:
             crash_penalty = self.Config.PENALTY_CRASH * (
                 (self.slot_num - self.current_step + 1) / self.slot_num
@@ -926,6 +931,7 @@ class CustomEnv(gym.Env):
         completion_rate = self.ep_completed / self.current_step
         drop_rate = self.ep_dropped / self.current_step
         backlog_rate = backlog / A
+        print(f"this episode arrived {A} tasks,and complete {self.ep_completed} tasks.")
 
         fig.suptitle(
             f"Episode Summary (Steps: {self.current_step}) | "
