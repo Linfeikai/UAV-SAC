@@ -1,0 +1,10 @@
+# 这个文件对应原列表中的 "Vanilla-SAC"
+# 不再需要 experiment_name: "Vanilla-SAC"
+
+agent_type: "sac"
+learning_rate: 0.0003
+gamma: 0.99
+total_timesteps: 100000
+batch_size: 256
+tau: 0.005
+buffer_size: 1000000

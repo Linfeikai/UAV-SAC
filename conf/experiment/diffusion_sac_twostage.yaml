@@ -1,0 +1,25 @@
+# conf/experiment/diffusion_sac_twostage.yaml
+
+# --- 核心修改 ---
+defaults:
+  # 这行代码的意思是：
+  # "把我需要的一个'老师配置'组件，默认设置为 teacher_config 组里的 vanilla_sac_teacher"
+  - teacher_config: vanilla_sac_teacher
+  # `_self_` 是一个特殊关键字，它确保写在本文件内的值，会覆盖掉 `defaults` 中加载进来的值。
+  # 这是一个好习惯，建议总是加上。
+  - _self_
+
+# --- 学生自己的配置 ---
+agent_type: "diffusion_sac"
+two_stage_training: true
+# 不再需要 teacher_config_name: Vanilla-SAC-Teacher 了！
+
+learning_starts: 10000
+total_timesteps: 100000
+qne_k_samples: 64
+qne_temperature: 0.01
+policy_kwargs:
+  T: 19
+  net_arch: [256, 256]
+wrapper_kwargs:
+  ue_embedding_dim: 8

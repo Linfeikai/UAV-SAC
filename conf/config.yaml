@@ -1,0 +1,17 @@
+# conf/config.yaml
+
+# `defaults` 列表是 Hydra 的核心。
+# 下面这行代码告诉 Hydra:
+# 1. 我有一个名为 `experiment` 的配置组。
+# 2. 默认情况下，请加载 `experiment` 组里的 `vanilla_sac.yaml` 文件。
+defaults:
+  - experiment: vanilla_sac
+
+# 你可以把所有实验共享的、或者希望从命令行控制的参数放在这里
+seed: 42
+ue: 20
+
+# 为 --evaluate 和 --sweep 参数创建占位符
+evaluate: null # null 在YAML中表示None
+sweep: null
+count: 5

@@ -1,0 +1,9 @@
+
+experiment_name: "DDPG"
+agent_type: "ddpg"
+learning_rate: 0.001 # 数值类型
+gamma: 0.99
+total_timesteps: 100000 # 可以写成科学计数法 1e5，但直接写更清晰
+batch_size: 256 # 经验回放的批量大小
+tau: 0.005 # 软更新参数
+buffer_size: 1000000 # 经验回放的缓冲区大小
