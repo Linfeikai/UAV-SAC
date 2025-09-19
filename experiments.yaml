@@ -29,6 +29,18 @@
   buffer_size: 1000000 # 经验回放的缓冲区大小
 
 
+# 这是列表的第三个元素
+- 
+  experiment_name: "DDPG"
+  agent_type: "ddpg"
+  learning_rate: 0.001 # 数值类型
+  gamma: 0.99
+  total_timesteps: 100000 # 可以写成科学计数法 1e5，但直接写更清晰
+  batch_size: 256 # 经验回放的批量大小
+  tau: 0.005 # 软更新参数
+  buffer_size: 1000000 # 经验回放的缓冲区大小
+
+
 - experiment_name: PPO-UAV-Baseline
   agent_type: ppo
   notes: "A baseline PPO experiment with default hyperparameters."
@@ -53,7 +65,9 @@
   experiment_name: "Diffusion-SAC"
   agent_type: "diffusion_sac"
   learning_starts: 10000 # 经验回放开始训练的步数
-  # learning_rate: 0.00003
+  lr_actor_initial: 5e-5
+  lr_critic_initial: 1.5e-4
+  lr_final: 1e-6
   total_timesteps: 100000
   qne_k_samples: 64 # QNE中的K值 表示每次生成几个候选解
   qne_temperature: 0.01 # QNE的温度参数，用于控制Softmax的平滑度
