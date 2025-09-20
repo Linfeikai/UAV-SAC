@@ -6,6 +6,8 @@
 # 2. 默认情况下，请加载 `experiment` 组里的 `vanilla_sac.yaml` 文件。
 defaults:
   - experiment: vanilla_sac
+  - _self_
+
 
 # 你可以把所有实验共享的、或者希望从命令行控制的参数放在这里
 seed: 42

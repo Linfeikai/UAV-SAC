@@ -1,25 +1,26 @@
-# conf/experiment/diffusion_sac_twostage.yaml
+# 文件路径: conf/experiment/diffusion_sac_twostage.yaml
 
-# --- 核心修改 ---
 defaults:
-  # 这行代码的意思是：
-  # "把我需要的一个'老师配置'组件，默认设置为 teacher_config 组里的 vanilla_sac_teacher"
-  - teacher_config: vanilla_sac_teacher
-  # `_self_` 是一个特殊关键字，它确保写在本文件内的值，会覆盖掉 `defaults` 中加载进来的值。
-  # 这是一个好习惯，建议总是加上。
   - _self_
+  # 这一行告诉Hydra，去顶级的`conf`目录下找`teacher_config`文件夹，
+  # 然后加载`vanilla_sac_teacher.yaml`文件。
+  # 这完全符合你的同级目录结构。
+  - teacher_config: vanilla_sac_teacher
 
-# --- 学生自己的配置 ---
+# ---- 下面是你这个实验自己的参数 ----
+
 agent_type: "diffusion_sac"
 two_stage_training: true
-# 不再需要 teacher_config_name: Vanilla-SAC-Teacher 了！
 
+# 其他 two_stage 实验特有的参数...
 learning_starts: 10000
 total_timesteps: 100000
 qne_k_samples: 64
 qne_temperature: 0.01
+
 policy_kwargs:
   T: 19
   net_arch: [256, 256]
+
 wrapper_kwargs:
   ue_embedding_dim: 8
